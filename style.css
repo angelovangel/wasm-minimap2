@@ -1,0 +1,141 @@
+/* Global & Typography */
+body { 
+    padding-top: 30px; 
+    padding-bottom: 30px; 
+    font-family: 'Inter', sans-serif; 
+    background-color: #f8f9fa;
+}
+h1 {
+    color: #343a40;
+    font-weight: 300;
+}
+.file-input { 
+    margin-bottom: 15px; 
+} 
+
+/* Form Control - Making it flat */
+.form-control {
+    border-radius: 0;
+    box-shadow: none;
+    border-color: #ced4da;
+}
+
+/* Button - Making it flat */
+.btn-primary {
+    background-color: #007bff;
+    border-color: #007bff;
+    border-radius: 0;
+    box-shadow: none;
+    text-transform: uppercase;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+}
+.btn-primary:hover, .btn-primary:focus {
+    background-color: #0056b3;
+    border-color: #0056b3;
+    box-shadow: none;
+}
+
+/* NEW: Download Button Style */
+.btn-success {
+    background-color: #28a745;
+    border-color: #28a745;
+    border-radius: 0;
+    box-shadow: none;
+    text-transform: uppercase;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+}
+.btn-success:hover, .btn-success:focus {
+    background-color: #1e7e34;
+    border-color: #1e7e34;
+    box-shadow: none;
+}
+
+/* Container for Run and Download buttons */
+.action-buttons {
+    display: flex;
+    align-items: center;
+    margin-top: 30px;
+    margin-bottom: 30px; /* Adjusted margin to control spacing */
+}
+
+/* List View Styles - Flat and clean */
+.depth-list {
+    list-style: none;
+    padding: 0;
+    overflow: visible;
+    border-top: 1px solid #e9ecef;
+}
+
+.depth-item {
+    display: flex;
+    align-items: center;
+    /*font-size: 13px;*/
+    padding: 15px 20px;
+    border-bottom: 1px solid #e9ecef;
+    margin-bottom: 0;
+    background-color: #fff;
+    transition: background-color 0.2s;
+}
+
+.depth-item:hover {
+    background-color: #f1f1f1;
+}
+
+/* Remove all individual corner radii for a flat look */
+.depth-item:first-child,
+.depth-item:last-child {
+    border-radius: 0;
+}
+
+.contig-name { flex: 1; text-align: left; padding-left: 30px; font-weight: 500; color: #495057;  }
+.mean-depth { flex: 0.8; text-align: right; font-weight: 500; color: #495057; }
+.contig-length { flex: 0.5; text-align: right; font-weight: 500; color: #495057; }
+.coverage { flex: 0.5; text-align: right; font-weight: 500; color: #495057; }
+.mean-mapq { flex: 0.5; text-align: right; padding-right: 15px; font-weight: 500; color: #495057; }
+.depth-profile { flex: 4; text-align: left; padding-left: 30px; font-weight: 500; color: #495057;  }
+
+/* Header Row - Simple and distinct */
+.depth-list-headers {
+    background-color: #e9ecef;
+    color: #6c757d !important;
+    font-weight: 500;
+    /*font-size: 13px;*/
+    text-transform: uppercase;
+    text-align: right;
+    /*letter-spacing: 0.5px;*/
+    padding: 10px 20px !important;
+    border: none !important;
+    margin-bottom: 0 !important;
+}
+
+/* Sparkline container */
+.sparkline-container {
+    min-height: 50px;
+    display: inline-block;
+    vertical-align: bottom;
+    width: 100%;
+}
+
+/* Alerts - Simple and flat */
+.alert {
+    border-radius: 0;
+    border: 1px solid transparent;
+    font-weight: 500;
+}
+
+/* 💡 NEW/MODIFIED STYLE FOR BIGGER TOOLTIP */
+.jqstooltip {
+    /* Increase padding to make the box bigger */
+    
+    /* Increase font size for better readability */
+    font-size: 16px !important; 
+    width: 150px !important;
+    height: 50px !important;
+    /* Adjust background color and border for flat look (optional) */
+    background-color: rgba(0, 0, 0, 0.75) !important;
+    border: none !important;
+    border-radius: 3px !important;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2) !important;
+}
