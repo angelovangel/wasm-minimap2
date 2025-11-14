@@ -13,10 +13,8 @@
 </head>
 <body>
     <div class="container">
-        <h1 class="mb-5">minimap2 in the browser</h1>
-        
+        <h2 class="mb-4">minimap2 in the browser</h2>
         <div class="row">
-            
             <div class="col-md-6 file-input">
                 <label for="ref" class="form-label fw-bold">1. Reference (.fasta/.fa)</label>
                 <input type="file" id="ref" class="form-control" accept=".fasta,.fa">
@@ -33,15 +31,24 @@
             <button id="btn" class="btn btn-primary btn-lg me-3">
                 <i class="fas fa-play"></i> RUN
             </button>
+            <button id="reset-btn" class="btn btn-secondary btn-lg me-3">
+                <i class="fas fa-redo"></i> RESET
+            </button>
             <a id="download-bam" href="#" class="btn btn-success btn-lg" style="display: none;" download="output.sorted.bam">
                 <i class="fas fa-download"></i> Download BAM
             </a>
         </div>
         
         <div id="output" class="mb-5">
-            <p id="initial-message" class="text-muted">Upload your files and click 'Run Analysis', no data leaves the browser.</p>
+            <p id="initial-message" class="text-muted">
+                Upload your files and click 'Run Analysis', no data leaves the browser.
+                The reference can have multiple entries, and all selected fastq files will be used in the alignment.
+            </p>
         </div>
         
+        <div id="flagstat-summary" class="mb-3">
+            </div>
+
         <div class="depth-list-headers depth-item">
             <div class="contig-name">Contig</div>
             <div class="contig-length">Length</div>

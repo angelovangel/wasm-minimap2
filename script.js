@@ -14,6 +14,11 @@ const SPARKLINE_COLOR = '#4c9aff';
 // **NEW GLOBAL VARIABLE** to store max length for proportional scaling
 let maxContigLength = 1; // Initialize to 1 to avoid division by zero
 
+// Function to reload the page
+function resetPage() {
+    window.location.reload();
+}
+
 // Aggressive cleaning function to ensure keys match
 function cleanContigName(name) {
     // Trim whitespace
@@ -119,15 +124,81 @@ async function run() {
         await CLI.exec("samtools sort -o output.sorted.bam output.bam");
         await CLI.exec("samtools index output.sorted.bam");
 
-        // for downloading the BAM file
-        const download_url = await CLI.download("output.sorted.bam");
+        // **NEW STEP 1: Run samtools flagstat**
+        const flagstatOutput = await CLI.exec("samtools flagstat output.sorted.bam");
+
+       // --- DOWNLOAD FIX ---
         
+        // 1. Read the file content from the Aioli filesystem as a Uint8Array
+        const bamData = await CLI.fs.readFile("output.sorted.bam");
+
+        // 2. Create a Blob object from the data
+        const bamBlob = new Blob([bamData], { type: 'application/octet-stream' }); 
+
+        // 3. Create a stable, revocable URL for the Blob
+        // This URL remains valid as long as the Blob object exists
+        const download_url = URL.createObjectURL(bamBlob);
+
         // **SUCCESS**: Set the download URL and show the button
         downloadButton.href = download_url;
         downloadButton.style.display = 'inline-block'; // Show the button
         
-        // **MODIFIED**: Clear the status/output div completely after a successful BAM generation
+        // Clear the status/output div completely after a successful BAM generation
         outputDiv.innerHTML = '';
+
+        
+        // 1. Total Reads: Matches the first line (Total QC-passed reads)
+        const totalReadsMatch = flagstatOutput.match(/^(\d+)\s*\+\s*\d+\s*in total/m);
+        // 2. Secondary Reads
+        const secondaryReadsMatch = flagstatOutput.match(/^(\d+)\s*\+\s*\d+\s*secondary/m);
+        // 3. Supplementary Reads
+        const supplementaryReadsMatch = flagstatOutput.match(/^(\d+)\s*\+\s*\d+\s*supplementary/m);
+        // 4. Mapped Reads: To get the total mapped count and percentage
+        const mappedReadsMatch = flagstatOutput.match(/^(\d+)\s*\+\s*\d+\s*mapped\s+\((\d+\.\d+)%/m);
+        
+        // --- DATA EXTRACTION & CALCULATION ---
+        let primaryReads = 'N/A';
+        let primaryMapped = 'N/A';
+        let primaryMappedPercent = 'N/A';
+
+        // Get the required raw counts (QC-passed)
+        const total = totalReadsMatch ? parseInt(totalReadsMatch[1], 10) : 0;
+        const secondary = secondaryReadsMatch ? parseInt(secondaryReadsMatch[1], 10) : 0;
+        const supplementary = supplementaryReadsMatch ? parseInt(supplementaryReadsMatch[1], 10) : 0;
+        
+        const mappedTotal = mappedReadsMatch ? parseInt(mappedReadsMatch[1], 10) : 0;
+        
+        // 1. Calculate Primary Reads
+        let calculatedPrimaryReads = total - secondary - supplementary;
+        
+        if (calculatedPrimaryReads > 0) {
+            primaryReads = calculatedPrimaryReads.toLocaleString();
+            
+            const mappedRatio = total > 0 ? (mappedTotal / total) : 0;
+            const calculatedPrimaryMapped = Math.round(calculatedPrimaryReads * mappedRatio);
+            
+            primaryMapped = calculatedPrimaryMapped.toLocaleString();
+            
+            // 3. Calculate Primary Mapped Percentage
+            const calculatedPrimaryMappedPercent = calculatedPrimaryReads > 0 
+                ? ((calculatedPrimaryMapped / calculatedPrimaryReads) * 100).toFixed(2)
+                : '0.00';
+                
+            primaryMappedPercent = calculatedPrimaryMappedPercent;
+        }
+
+        const summaryHtml = `
+            <div class="alert alert-info summary-box" role="alert">
+                <span class="fw-bold">Total reads:</span> ${primaryReads} &nbsp;|&nbsp; 
+                <span class="fw-bold">Mapped reads:</span> ${primaryMapped} 
+                (${primaryMappedPercent}%)
+            </div>
+        `;
+        document.getElementById("flagstat-summary").innerHTML = summaryHtml;
+        
+        // ... (rest of the code)
+
+
         const depthOutput = await CLI.exec("samtools depth -aa output.sorted.bam");
         
         // Capture samtools coverage output with -H (header)
@@ -196,7 +267,7 @@ async function run() {
                             const numreads = parseInt(fields[3], 10); 
                             const contLength = parseInt(fields[2], 10);
                             const avgmapq = parseFloat(fields[8]).toFixed(0); 
-                            const coverage = parseFloat(fields[5]).toFixed(1);
+                            const coverage = parseFloat(fields[5]).toFixed(0);
                             console.log(`Contig: ${cleanCovRname}, Length: ${contLength}, Reads: ${numreads}, Coverage: ${coverage}, Mean MAPQ: ${avgmapq}`);
                             
                             contigCoverageStats[cleanCovRname] = {
@@ -266,4 +337,6 @@ async function run() {
     }
 }
 
+// Attach event listeners
 document.getElementById("btn").addEventListener("click", run);
+document.getElementById("reset-btn").addEventListener("click", resetPage);
