@@ -88,9 +88,6 @@ h1 {
     transition: background-color 0.2s;
 }
 
-.depth-item:hover {
-    background-color: #f1f1f1;
-}
 
 /* Remove all individual corner radii for a flat look */
 .depth-item:first-child,

@@ -1,6 +1,7 @@
 const CLI = await new Aioli([
     "samtools/1.10", 
     "minimap2/2.22",
+    "seqtk/1.4"
     // {
     //     tool: "faster2",
     //     version: "0.3.0",
@@ -82,14 +83,14 @@ async function run() {
     const outputDiv = document.getElementById("output");
     const ulList = document.getElementById('depthList');
     const downloadButton = document.getElementById("download-bam"); 
-    const initialMessage = document.getElementById("initial-message"); 
-    
+
     // 1. Initial State Setup
     // Display 'Running' message and hide the initial instruction
     outputDiv.innerHTML = '<div class="alert alert-info" role="alert">Running analysis... This may take a moment.</div>';
     document.getElementById("btn").disabled = true;
     //downloadButton.style.display = 'none'; // Hide button at start of run
     ulList.innerHTML = ''; 
+    document.getElementById("flagstat-summary").innerHTML = '';
     
     // Reset maxContigLength at the start of a run
     maxContigLength = 1;
@@ -112,8 +113,8 @@ async function run() {
         
         const mmap_out = await CLI.exec("minimap2", [
             "-a",
-            "-I", "1G",
-            "-K", "100M",
+            //"-I", "1G",
+            //"-K", "100M",
             "-o", "output.sam",
             "-x", "map-ont",
             ref[0], 
@@ -147,16 +148,12 @@ async function run() {
         outputDiv.innerHTML = '';
 
         
-        // 1. Total Reads: Matches the first line (Total QC-passed reads)
+        //Flagstat output
         const totalReadsMatch = flagstatOutput.match(/^(\d+)\s*\+\s*\d+\s*in total/m);
-        // 2. Secondary Reads
         const secondaryReadsMatch = flagstatOutput.match(/^(\d+)\s*\+\s*\d+\s*secondary/m);
-        // 3. Supplementary Reads
         const supplementaryReadsMatch = flagstatOutput.match(/^(\d+)\s*\+\s*\d+\s*supplementary/m);
-        // 4. Mapped Reads: To get the total mapped count and percentage
         const mappedReadsMatch = flagstatOutput.match(/^(\d+)\s*\+\s*\d+\s*mapped\s+\((\d+\.\d+)%/m);
         
-        // --- DATA EXTRACTION & CALCULATION ---
         let primaryReads = 'N/A';
         let primaryMapped = 'N/A';
         let primaryMappedPercent = 'N/A';
@@ -168,7 +165,6 @@ async function run() {
         
         const mappedTotal = mappedReadsMatch ? parseInt(mappedReadsMatch[1], 10) : 0;
         
-        // 1. Calculate Primary Reads
         let calculatedPrimaryReads = total - secondary - supplementary;
         
         if (calculatedPrimaryReads > 0) {
@@ -189,19 +185,16 @@ async function run() {
 
         const summaryHtml = `
             <div class="alert alert-info summary-box" role="alert">
-                <span class="fw-bold">Total reads:</span> ${primaryReads} &nbsp;|&nbsp; 
+                <span class="fw-bold">Total fastq reads:</span> ${primaryReads} &nbsp;|&nbsp; 
                 <span class="fw-bold">Mapped reads:</span> ${primaryMapped} 
                 (${primaryMappedPercent}%)
             </div>
         `;
         document.getElementById("flagstat-summary").innerHTML = summaryHtml;
         
-        // ... (rest of the code)
-
-
+        //samtools depth 
         const depthOutput = await CLI.exec("samtools depth -aa output.sorted.bam");
-        
-        // Capture samtools coverage output with -H (header)
+        // samtools coverage
         const covOutput = await CLI.exec("samtools coverage -H output.sorted.bam");
         
         // --- DATA AGGREGATION & LIST POPULATION ---
