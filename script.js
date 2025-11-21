@@ -100,7 +100,7 @@ async function run() {
         const r = document.getElementById("ref").files;
 
         if (q.length === 0 || r.length === 0) {
-            outputDiv.innerHTML = '<div class="alert alert-danger" role="alert">Please select both a **Reference Genome** and **Query Reads** file(s).</div>';
+            outputDiv.innerHTML = '<div class="alert alert-danger" role="alert">Please select both a **Reference** and **Query** file(s).</div>';
             document.getElementById("btn").disabled = false;
             return;
         }
@@ -125,30 +125,24 @@ async function run() {
         await CLI.exec("samtools sort -o output.sorted.bam output.bam");
         await CLI.exec("samtools index output.sorted.bam");
 
-        // **NEW STEP 1: Run samtools flagstat**
+        // Run samtools flagstat
         const flagstatOutput = await CLI.exec("samtools flagstat output.sorted.bam");
-
-       // --- DOWNLOAD FIX ---
         
+        // BAM download bug fix
         // 1. Read the file content from the Aioli filesystem as a Uint8Array
         const bamData = await CLI.fs.readFile("output.sorted.bam");
-
         // 2. Create a Blob object from the data
         const bamBlob = new Blob([bamData], { type: 'application/octet-stream' }); 
-
         // 3. Create a stable, revocable URL for the Blob
         // This URL remains valid as long as the Blob object exists
         const download_url = URL.createObjectURL(bamBlob);
-
-        // **SUCCESS**: Set the download URL and show the button
-        downloadButton.href = download_url;
-        downloadButton.style.display = 'inline-block'; // Show the button
         
-        // Clear the status/output div completely after a successful BAM generation
+        downloadButton.href = download_url;
+        downloadButton.style.display = 'inline-block'; 
         outputDiv.innerHTML = '';
 
         
-        //Flagstat output
+        //Reads stats 
         const totalReadsMatch = flagstatOutput.match(/^(\d+)\s*\+\s*\d+\s*in total/m);
         const secondaryReadsMatch = flagstatOutput.match(/^(\d+)\s*\+\s*\d+\s*secondary/m);
         const supplementaryReadsMatch = flagstatOutput.match(/^(\d+)\s*\+\s*\d+\s*supplementary/m);
