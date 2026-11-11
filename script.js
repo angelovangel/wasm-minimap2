@@ -45,7 +45,7 @@ function subsampleDepthData(data) {
     return subsampled;
 }
 
-// **MODIFIED RENDER FUNCTION** to use proportional width
+// use proportional width
 function renderSparklines() {
     $('#depthList .sparkline-container').each(function() {
         const $this = $(this);
@@ -113,16 +113,18 @@ async function run() {
         
         const mmap_out = await CLI.exec("minimap2", [
             "-a",
-            //"-I", "1G",
-            //"-K", "100M",
+            "-K", "50M", // smaller query batches -> lower peak memory (default 500M)
             "-o", "output.sam",
             "-x", "map-ont",
-            ref[0], 
+            ref[0],
             ...query
         ]);
-        await CLI.exec("samtools view -S -b output.sam -o output.bam");
-        
-        await CLI.exec("samtools sort -o output.sorted.bam output.bam");
+
+        // Sort SAM directly into BAM (skips the intermediate unsorted BAM).
+        // -m caps the per-thread sort buffer so samtools spills to temp files.
+        await CLI.exec("samtools sort -m 200M -o output.sorted.bam output.sam");
+        // Free the SAM from the in-memory filesystem as soon as it's no longer needed
+        await CLI.fs.unlink("output.sam");
         await CLI.exec("samtools index output.sorted.bam");
 
         // Run samtools flagstat
