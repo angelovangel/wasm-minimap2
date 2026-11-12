@@ -26,36 +26,74 @@ function cleanContigName(name) {
     return name.trim();
 }
 
-// use proportional width
+// Format a base-pair position compactly: 950 bp, 12.5 kb, 3 Mb
+function formatBp(bp) {
+    if (bp >= 1e6) return `${+(bp / 1e6).toFixed(2)} Mb`;
+    if (bp >= 1e3) return `${+(bp / 1e3).toFixed(1)} kb`;
+    return `${bp} bp`;
+}
+
+// "Nice" tick step (1, 2 or 5 x 10^k) giving roughly `target` ticks over `length`
+function niceStep(length, target) {
+    const raw = length / Math.max(1, target);
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const n = raw / mag;
+    return (n < 1.5 ? 1 : n < 3.5 ? 2 : n < 7.5 ? 5 : 10) * mag;
+}
+
+// Thin contig line with tick marks at nice positions
+function buildAxisHtml(length, widthPct) {
+    const step = Math.max(1, niceStep(length, Math.max(2, Math.round(widthPct / 20))));
+    let ticks = '';
+    // nice ticks, skipping any too close to the end so they don't collide with the length label
+    for (let pos = 0; pos <= length - 0.75 * step; pos += step) {
+        const pct = (pos / length) * 100;
+        // keep labels inside the line: left-align at start, centre elsewhere
+        const shift = pct < 5 ? '0' : '-50%';
+        ticks += `<span class="axis-tick" style="left:${pct}%"></span>` +
+                 `<span class="axis-label" style="left:${pct}%;transform:translateX(${shift})">${formatBp(pos)}</span>`;
+    }
+    // final tick: exact contig length, right-aligned to the end of the line
+    ticks += `<span class="axis-tick" style="left:100%"></span>` +
+             `<span class="axis-label axis-end" style="left:100%;transform:translateX(-100%)">${formatBp(length)}</span>`;
+    return `<div class="contig-axis">${ticks}</div>`;
+}
+
+// Sparkline + contig line, both scaled to contig length relative to the longest contig
 function renderSparklines() {
-    $('#depthList .sparkline-container').each(function() {
-        const $this = $(this);
-        const depths = $this.data('depths'); 
-        const contigLength = $this.data('length'); // Get length
-        
-        // Calculate proportional width (max 100%)
-        const proportionalWidth = Math.max(20, (contigLength / maxContigLength) * 100); 
-        
-        // Apply proportional width to the container
-        $this.css('width', `${proportionalWidth}%`);
+    $('#depthList .profile-track').each(function() {
+        const $track = $(this);
+        const $spark = $track.find('.sparkline-container');
+        const depths = $spark.data('depths');
+        const contigLength = $track.data('length');
+
+        const proportionalWidth = Math.max(20, (contigLength / maxContigLength) * 100);
+        $track.css('width', `${proportionalWidth}%`);
+        $track.append(buildAxisHtml(contigLength, proportionalWidth));
 
         if (depths && depths.length > 0) {
-            $this.sparkline(depths, {
+            const binSize = Math.max(1, Math.ceil(contigLength / NBINS));
+            $spark.sparkline(depths, {
                 type: 'line',
-                width: '100%', // Sparkline fills its container's proportional width
+                width: '100%',
                 height: '50px',
-                lineColor: SPARKLINE_COLOR, 
+                lineColor: SPARKLINE_COLOR,
                 fillColor: SPARKLINE_COLOR + '33',
                 spotColor: false,
                 minSpotColor: false,
-                maxSpotColor: false, 
+                maxSpotColor: false,
                 chartRangeMin: 0,
-                highlightLineColor: '#6c757d', 
-                highlightSpotColor: '#6c757d', 
-                tooltipFormat: 'Depth: {{y}}' 
+                highlightLineColor: '#6c757d',
+                highlightSpotColor: '#6c757d',
+                // tooltip shows the window's position range and its mean depth
+                tooltipFormatter: (sp, opts, fields) => {
+                    const st = fields.x * binSize;
+                    const en = Math.min(st + binSize, contigLength);
+                    return `${formatBp(st + 1)}–${formatBp(en)}<br>Depth: ${fields.y}`;
+                }
             });
         } else {
-            $this.text('No depth data');
+            $spark.text('No depth data');
         }
     });
 }
@@ -121,9 +159,31 @@ async function run() {
             return;
         }
 
+        const subsamplePct = parseFloat(document.getElementById("subsample").value);
+        if (!(subsamplePct > 0 && subsamplePct <= 100)) {
+            outputDiv.innerHTML = '<div class="alert alert-danger" role="alert">Proportion of reads must be between 0 and 100%.</div>';
+            return;
+        }
+
         setProgress(5, "Loading files…");
-        const query = await CLI.mount(q);
+        let query = await CLI.mount(q);
         const ref = await CLI.mount(r);
+
+        // --- OPTIONAL SUBSAMPLING (seqtk sample, fixed seed for reproducibility) ---
+        // seqtk writes to stdout, so its output is written back into the
+        // in-memory filesystem as a plain fastq that minimap2 can read.
+        const subsampled = [];
+        if (subsamplePct < 100) {
+            const frac = String(subsamplePct / 100);
+            for (let i = 0; i < query.length; i++) {
+                setProgress(5, `Subsampling ${subsamplePct}% of reads (file ${i + 1}/${query.length})…`);
+                const fq = await CLI.exec("seqtk", ["sample", "-s", "11", query[i], frac]);
+                const name = `subsample_${i}.fastq`;
+                await CLI.fs.writeFile(name, fq);
+                subsampled.push(name);
+            }
+            query = subsampled;
+        }
 
         // --- PIPELINE EXECUTION ---
         setProgress(10, "Aligning reads with minimap2 (longest step)…");
@@ -135,6 +195,8 @@ async function run() {
             ref[0],
             ...query
         ]);
+        // Subsampled fastqs are no longer needed once aligned
+        for (const f of subsampled) await CLI.fs.unlink(f);
 
         // Sort SAM directly into BAM (skips the intermediate unsorted BAM).
         // -m caps the per-thread sort buffer so samtools spills to temp files.
@@ -199,7 +261,7 @@ async function run() {
 
         const summaryHtml = `
             <div class="alert alert-info summary-box" role="alert">
-                <span class="fw-bold">Total fastq reads:</span> ${primaryReads} &nbsp;|&nbsp; 
+                <span class="fw-bold">${subsamplePct < 100 ? `Reads used (${subsamplePct}% subsample)` : "Total fastq reads"}:</span> ${primaryReads} &nbsp;|&nbsp; 
                 <span class="fw-bold">Mapped reads:</span> ${primaryMapped} 
                 (${primaryMappedPercent}%)
             </div>
@@ -259,12 +321,11 @@ async function run() {
         const listItemsHtml = [];
         for (const c of contigStats) {
             const depthsJSON = JSON.stringify(profiles[c.name] || []);
-            const sparklineHtml = `<span class="sparkline-container" data-depths='${depthsJSON}' data-length='${c.length}'></span>`;
+            const sparklineHtml = `<div class="profile-track" data-length='${c.length}'><span class="sparkline-container" data-depths='${depthsJSON}'></span></div>`;
 
             listItemsHtml.push(`
                 <li class="depth-item">
-                    <div class="contig-name">${c.name}</div>
-                    <div class="contig-length">${c.length.toLocaleString()}</div>
+                    <div class="contig-name" title="${c.name}">${c.name}</div>
                     <div class="mean-depth">${c.meandepth}</div>
                     
                     <div class="coverage">${c.coverage}%</div>

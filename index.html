@@ -15,16 +15,23 @@
     <div class="container">
         <h2 class="mb-4">minimap2 in the browser</h2>
         <div class="row">
-            <div class="col-md-6 file-input">
+            <div class="col-md-5 file-input">
                 <label for="ref" class="form-label fw-bold">1. Reference (.fasta/.fa)</label>
                 <input type="file" id="ref" class="form-control" accept=".fasta,.fa">
             </div>
-            
-            <div class="col-md-6 file-input">
+
+            <div class="col-md-5 file-input">
                 <label for="query" class="form-label fw-bold">2. Query Reads (.fastq/.fq)</label>
                 <input type="file" id="query" class="form-control" multiple accept=".fastq,.gz">
             </div>
-            
+
+            <div class="col-md-2 file-input">
+                <label for="subsample" class="form-label fw-bold">3. Reads used</label>
+                <div class="input-group" title="Randomly subsample each fastq (seqtk, fixed seed). 100% = use all reads.">
+                    <input type="number" id="subsample" class="form-control" value="100" min="0.1" max="100" step="any">
+                    <span class="input-group-text">%</span>
+                </div>
+            </div>
         </div>
         
         <div class="action-buttons">
@@ -51,8 +58,7 @@
 
         <div class="depth-list-headers depth-item">
             <div class="contig-name">Contig</div>
-            <div class="contig-length">Length</div>
-            <div class="mean-depth">Mean Depth</div>
+            <div class="mean-depth">Depth</div>
             
             <div class="coverage">Cov (%)</div>
             <div class="mean-mapq">MAPQ</div>
