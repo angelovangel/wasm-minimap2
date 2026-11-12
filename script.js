@@ -9,7 +9,7 @@ const CLI = await new Aioli([
     // }
 ], {debug: true});
 
-const MAX_POINTS = 300; 
+const NBINS = 300; // number of windows in each contig's depth profile
 const SPARKLINE_COLOR = '#4c9aff';
 
 // **NEW GLOBAL VARIABLE** to store max length for proportional scaling
@@ -24,25 +24,6 @@ function resetPage() {
 function cleanContigName(name) {
     // Trim whitespace
     return name.trim();
-}
-
-function subsampleDepthData(data) {
-    if (data.length <= MAX_POINTS) {
-        return data;
-    }
-
-    const step = Math.ceil(data.length / MAX_POINTS);
-    const subsampled = [];
-    
-    for (let i = 0; i < data.length; i += step) {
-        subsampled.push(data[i]);
-    }
-    
-    if (subsampled.length === 0 && data.length > 0) {
-         subsampled.push(data[0]);
-    }
-    
-    return subsampled;
 }
 
 // use proportional width
@@ -79,14 +60,49 @@ function renderSparklines() {
     });
 }
 
+// Progress bar: the wasm tools don't report internal progress, so the bar
+// advances per pipeline step and an elapsed timer shows it's still working.
+let progressTimer = null;
+
+function showProgress(outputDiv) {
+    outputDiv.innerHTML = `
+        <div class="alert alert-info" role="alert">
+            <div class="d-flex justify-content-between mb-2">
+                <span id="progress-label">Starting…</span>
+                <span id="progress-elapsed" class="text-muted">0s</span>
+            </div>
+            <div class="progress" role="progressbar" aria-label="Analysis progress" aria-valuemin="0" aria-valuemax="100">
+                <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" style="width: 0%"></div>
+            </div>
+        </div>`;
+    const t0 = Date.now();
+    clearInterval(progressTimer);
+    progressTimer = setInterval(() => {
+        const el = document.getElementById("progress-elapsed");
+        if (el) el.textContent = `${Math.round((Date.now() - t0) / 1000)}s`;
+    }, 1000);
+}
+
+function setProgress(pct, label) {
+    const bar = document.getElementById("progress-bar");
+    if (!bar) return;
+    bar.style.width = `${pct}%`;
+    bar.parentElement.setAttribute("aria-valuenow", pct);
+    document.getElementById("progress-label").textContent = label;
+}
+
+function stopProgress() {
+    clearInterval(progressTimer);
+    progressTimer = null;
+}
+
 async function run() {
     const outputDiv = document.getElementById("output");
     const ulList = document.getElementById('depthList');
-    const downloadButton = document.getElementById("download-bam"); 
+    const downloadButton = document.getElementById("download-bam");
 
     // 1. Initial State Setup
-    // Display 'Running' message and hide the initial instruction
-    outputDiv.innerHTML = '<div class="alert alert-info" role="alert">Running analysis... This may take a moment.</div>';
+    showProgress(outputDiv);
     document.getElementById("btn").disabled = true;
     //downloadButton.style.display = 'none'; // Hide button at start of run
     ulList.innerHTML = ''; 
@@ -105,12 +121,12 @@ async function run() {
             return;
         }
 
-        const query = await CLI.mount(q); 
-        const ref = await CLI.mount(r);   
+        setProgress(5, "Loading files…");
+        const query = await CLI.mount(q);
+        const ref = await CLI.mount(r);
 
         // --- PIPELINE EXECUTION ---
-        
-        
+        setProgress(10, "Aligning reads with minimap2 (longest step)…");
         const mmap_out = await CLI.exec("minimap2", [
             "-a",
             "-K", "50M", // smaller query batches -> lower peak memory (default 500M)
@@ -122,12 +138,15 @@ async function run() {
 
         // Sort SAM directly into BAM (skips the intermediate unsorted BAM).
         // -m caps the per-thread sort buffer so samtools spills to temp files.
+        setProgress(65, "Sorting alignments…");
         await CLI.exec("samtools sort -m 200M -o output.sorted.bam output.sam");
         // Free the SAM from the in-memory filesystem as soon as it's no longer needed
         await CLI.fs.unlink("output.sam");
+        setProgress(80, "Indexing BAM…");
         await CLI.exec("samtools index output.sorted.bam");
 
         // Run samtools flagstat
+        setProgress(85, "Counting mapped reads…");
         const flagstatOutput = await CLI.exec("samtools flagstat output.sorted.bam");
         
         // BAM download bug fix
@@ -141,7 +160,6 @@ async function run() {
         
         downloadButton.href = download_url;
         downloadButton.style.display = 'inline-block'; 
-        outputDiv.innerHTML = '';
 
         
         //Reads stats 
@@ -188,133 +206,79 @@ async function run() {
         `;
         document.getElementById("flagstat-summary").innerHTML = summaryHtml;
         
-        //samtools depth 
-        const depthOutput = await CLI.exec("samtools depth -aa output.sorted.bam");
-        // samtools coverage
+        // --- PER-CONTIG STATS (samtools coverage) ---
+        // Columns: 0:#rname 1:startpos 2:endpos 3:numreads 4:covbases 5:coverage 6:meandepth 7:meanbaseq 8:meanmapq
+        setProgress(90, "Computing per-contig coverage…");
         const covOutput = await CLI.exec("samtools coverage -H output.sorted.bam");
-        
-        // --- DATA AGGREGATION & LIST POPULATION ---
-        
-        // Robust parsing for samtools depth output
-        const contigData = {}; 
-        const lines = depthOutput.trim().split('\n').filter(line => line.length > 0);
-        
-        if (lines.length === 0) {
-            outputDiv.innerHTML = '<div class="alert alert-warning" role="alert">Analysis completed, but no depth data was generated. Check your input files.</div>';
+        const contigStats = [];
+        for (const line of covOutput.trim().split('\n')) {
+            const f = line.split('\t');
+            if (f.length < 9) continue;
+            const num = (x) => { const v = parseFloat(x); return isNaN(v) ? 0 : v; };
+            contigStats.push({
+                name: cleanContigName(f[0]),
+                length: num(f[2]),
+                numreads: num(f[3]),
+                coverage: num(f[5]).toFixed(0),
+                meandepth: num(f[6]).toFixed(0),
+                meanmapq: num(f[8]).toFixed(0),
+            });
+        }
+
+        if (contigStats.length === 0) {
+            outputDiv.innerHTML = '<div class="alert alert-warning" role="alert">Analysis completed, but no coverage data was generated. Check your input files.</div>';
             downloadButton.style.display = 'none';
-            document.getElementById("btn").disabled = false;
             return;
         }
 
-        lines.forEach(line => {
-            const fields = line.split('\t');
-            if (fields.length === 3) {
-                const [rname, pos, depthStr] = fields;
-                
-                // Use clean function
-                const cleanRname = cleanContigName(rname); 
-                const depth = parseInt(depthStr.trim(), 10);
-                
-                if (!contigData[cleanRname]) {
-                    // **MODIFIED**: Added 'length' property
-                    contigData[cleanRname] = { depths: [], sum: 0, count: 0, length: 0 };
-                }
-                
-                contigData[cleanRname].depths.push(depth);
-                contigData[cleanRname].sum += depth;
-                contigData[cleanRname].count++;
-                contigData[cleanRname].length++; // Increment length (number of depth points)
+        // --- BINNED DEPTH PROFILE (samtools bedcov over ~NBINS windows per contig) ---
+        // bedcov reports the summed per-base depth in each window; dividing by the
+        // window length gives mean depth, so dips/spikes aren't lost to subsampling.
+        const bed = [];
+        for (const c of contigStats) {
+            const w = Math.max(1, Math.ceil(c.length / NBINS));
+            for (let st = 0; st < c.length; st += w) {
+                bed.push(`${c.name}\t${st}\t${Math.min(st + w, c.length)}`);
             }
-        });
-        
-        // **NEW STEP**: Find the maximum contig length for scaling
-        for (const rname in contigData) {
-            maxContigLength = Math.max(maxContigLength, contigData[rname].length);
+            maxContigLength = Math.max(maxContigLength, c.length);
+        }
+        await CLI.fs.writeFile("windows.bed", bed.join('\n') + '\n');
+        setProgress(95, "Building depth profiles…");
+        const bedcovOutput = await CLI.exec("samtools bedcov windows.bed output.sorted.bam");
+
+        const profiles = {};
+        for (const line of bedcovOutput.trim().split('\n')) {
+            const f = line.split('\t');
+            if (f.length < 4) continue;
+            const len = parseInt(f[2], 10) - parseInt(f[1], 10);
+            const mean = len > 0 ? parseFloat(f[3]) / len : 0;
+            (profiles[cleanContigName(f[0])] ??= []).push(Math.round(mean * 10) / 10);
         }
 
-        // CORRECTED: Parse samtools coverage output for 9 fields
-        const covLines = covOutput.trim().split('\n').filter(line => line.length > 0);
-        console.log("Coverage output lines:", covLines);
-        const contigCoverageStats = {};
-
-        if (covLines.length >= 1) {
-            for (let i = 0; i < covLines.length; i++) {
-                // Use split by any whitespace and filter out empty strings
-                //const fields = covLines[i].split(/\s+/).filter(f => f.length > 0);
-                const fields = covLines[i].split('\t');
-                // Check for the expected 9 fields
-                if (fields.length >= 8) {
-                    try {
-                        const rname = fields[0];
-                        const cleanCovRname = cleanContigName(rname);
-                        console.log("Processing coverage for contig:", cleanCovRname);
-                        
-                        // Skip the overall summary line ('*')
-                        //if (cleanCovRname && cleanCovRname !== '*') {
-                            // 9-Field Output Indices:
-                            // 0:#rname, 1:startpos, 2:endpos, 3:numreads, 4:coveredbases, 5:coverage, 6:meandepth, 7:meanbaseq, 8:meanmapq
-                            const numreads = parseInt(fields[3], 10); 
-                            const contLength = parseInt(fields[2], 10);
-                            const avgmapq = parseFloat(fields[8]).toFixed(0); 
-                            const coverage = parseFloat(fields[5]).toFixed(0);
-                            console.log(`Contig: ${cleanCovRname}, Length: ${contLength}, Reads: ${numreads}, Coverage: ${coverage}, Mean MAPQ: ${avgmapq}`);
-                            
-                            contigCoverageStats[cleanCovRname] = {
-                                contLength: isNaN(contLength) ? 0 : contLength,
-                                numreads: isNaN(numreads) ? 0 : numreads,
-                                coverage: isNaN(parseFloat(coverage)) ? '0.0' : coverage,
-                                meanmapq: isNaN(parseFloat(avgmapq)) ? '0' : avgmapq
-                            };
-                        //}
-                    } catch (e) {
-                        console.error("Error parsing coverage line:", covLines[i], e);
-                    }
-                } else {
-                    console.warn("Skipping coverage line due to missing fields (expected 9+, got " + fields.length + "):", covLines[i]);
-                }
-            }
-        }
-        
+        // --- LIST POPULATION ---
         const listItemsHtml = [];
-        // Iterate over the successfully parsed depth data (using the cleaned keys)
-        for (const rname in contigData) {
-            const data = contigData[rname];
-            const meanDepth = data.count > 0 ? (data.sum / data.count).toFixed(0) : '0';
-            
-            const subsampledDepths = subsampleDepthData(data.depths);
-            const depthsJSON = JSON.stringify(subsampledDepths);
-            
-            // **MODIFIED**: Pass the contig length using a data attribute
-            const sparklineHtml = `<span class="sparkline-container" data-depths='${depthsJSON}' data-length='${data.length}'></span>`;
+        for (const c of contigStats) {
+            const depthsJSON = JSON.stringify(profiles[c.name] || []);
+            const sparklineHtml = `<span class="sparkline-container" data-depths='${depthsJSON}' data-length='${c.length}'></span>`;
 
-            // Lookup coverage stats using the same cleaned key
-            const stats = contigCoverageStats[rname] || { numreads: 0, contLength: 0, coverage: '0.0', meanmapq: '0' };
-            
-            // Format output
-            const numreads = stats.numreads.toLocaleString(); 
-            const contLength = stats.contLength.toLocaleString();
-            const coverage = stats.coverage + '%';
-            const meanmapq = stats.meanmapq;
-
-            // Insert new columns into the list item HTML
-            const listItem = `
+            listItemsHtml.push(`
                 <li class="depth-item">
-                    <div class="contig-name">${rname}</div>
-                    <div class="contig-length">${contLength}</div>
-                    <div class="mean-depth">${meanDepth}</div>
+                    <div class="contig-name">${c.name}</div>
+                    <div class="contig-length">${c.length.toLocaleString()}</div>
+                    <div class="mean-depth">${c.meandepth}</div>
                     
-                    <div class="coverage">${coverage}</div>
-                    <div class="mean-mapq">${meanmapq}</div>
+                    <div class="coverage">${c.coverage}%</div>
+                    <div class="mean-mapq">${c.meanmapq}</div>
                     <div class="depth-profile">${sparklineHtml}</div>
                 </li>
-            `;
-            listItemsHtml.push(listItem);
+            `);
         }
         
         ulList.innerHTML = listItemsHtml.join('');
 
         // --- SPARKLINE RENDERING ---
         renderSparklines(); 
+        outputDiv.innerHTML = ''; // done: remove progress bar
 
     } catch (error) {
         console.error(error);
@@ -322,6 +286,7 @@ async function run() {
         downloadButton.style.display = 'none';
         outputDiv.innerHTML = `<div class="alert alert-danger" role="alert">An error occurred during execution: **${error.message || String(error) || 'Unknown Aioli/CLI Error'}**</div>`;
     } finally {
+        stopProgress();
         document.getElementById("btn").disabled = false;
     }
 }
