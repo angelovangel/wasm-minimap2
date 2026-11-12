@@ -15,6 +15,11 @@ const SPARKLINE_COLOR = '#4c9aff';
 // **NEW GLOBAL VARIABLE** to store max length for proportional scaling
 let maxContigLength = 1; // Initialize to 1 to avoid division by zero
 
+// Per-contig results of the last run (stats + binned depth), used by the reads view
+let contigResults = [];
+let referenceFile = null; // the reference fasta File, read again by the reads view
+const contigSeqCache = new Map();
+
 // Function to reload the page
 function resetPage() {
     window.location.reload();
@@ -104,13 +109,13 @@ let progressTimer = null;
 
 function showProgress(outputDiv) {
     outputDiv.innerHTML = `
-        <div class="alert alert-info" role="alert">
-            <div class="d-flex justify-content-between mb-2">
+        <div class="run-progress">
+            <div class="run-progress-text">
                 <span id="progress-label">Starting…</span>
-                <span id="progress-elapsed" class="text-muted">0s</span>
+                <span id="progress-elapsed">0s</span>
             </div>
-            <div class="progress" role="progressbar" aria-label="Analysis progress" aria-valuemin="0" aria-valuemax="100">
-                <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" style="width: 0%"></div>
+            <div class="run-progress-track" role="progressbar" aria-label="Analysis progress" aria-valuemin="0" aria-valuemax="100">
+                <div id="progress-bar" class="run-progress-fill" style="width: 0%"></div>
             </div>
         </div>`;
     const t0 = Date.now();
@@ -168,6 +173,8 @@ async function run() {
         setProgress(5, "Loading files…");
         let query = await CLI.mount(q);
         const ref = await CLI.mount(r);
+        referenceFile = r[0];
+        contigSeqCache.clear();
 
         // --- OPTIONAL SUBSAMPLING (seqtk sample, fixed seed for reproducibility) ---
         // seqtk writes to stdout, so its output is written back into the
@@ -319,13 +326,14 @@ async function run() {
 
         // --- LIST POPULATION ---
         const listItemsHtml = [];
-        for (const c of contigStats) {
+        contigResults = contigStats.map(c => ({ ...c, profile: profiles[c.name] || [] }));
+        for (const [i, c] of contigStats.entries()) {
             const depthsJSON = JSON.stringify(profiles[c.name] || []);
             const sparklineHtml = `<div class="profile-track" data-length='${c.length}'><span class="sparkline-container" data-depths='${depthsJSON}'></span></div>`;
 
             listItemsHtml.push(`
-                <li class="depth-item">
-                    <div class="contig-name" title="${c.name}">${c.name}</div>
+                <li class="depth-item clickable" data-index="${i}" title="Click to view reads for ${c.name}">
+                    <div class="contig-name">${c.name}</div>
                     <div class="mean-depth">${c.meandepth}</div>
                     
                     <div class="coverage">${c.coverage}%</div>
@@ -354,6 +362,179 @@ async function run() {
         document.getElementById("btn").disabled = false;
     }
 }
+
+// --- READS VIEW (opens reads.html in a new tab) ---
+const MAX_VIEW_READS = 3000; // above this, reads are randomly subsampled for display
+const MIN_GAP_BP = 20;       // deletions/introns at least this long are drawn as gaps
+const MIN_INS_BP = 20;       // insertions at least this long get a marker
+const EXCLUDE_FLAGS = "0x704"; // unmapped, secondary, QC-fail, duplicate
+
+const MAX_SEQ_BP = 30e6;     // longer contigs are shown without mismatches/consensus
+
+// Stream the reference fasta and return one contig's sequence (uppercase), without
+// holding the whole file in memory. Header name = text after '>' up to whitespace.
+async function readContigSeq(file, name) {
+    if (contigSeqCache.has(name)) return contigSeqCache.get(name);
+    const reader = file.stream().pipeThrough(new TextDecoderStream()).getReader();
+    const parts = [];
+    let inTarget = false, done = false, rest = '';
+    while (!done) {
+        const { value, done: eof } = await reader.read();
+        const text = rest + (value || '');
+        const lines = text.split('\n');
+        rest = eof ? '' : lines.pop();
+        for (const raw of lines) {
+            const line = raw.trimEnd();
+            if (line.startsWith('>')) {
+                if (inTarget) { done = true; break; }
+                inTarget = line.slice(1).split(/\s/)[0] === name;
+            } else if (inTarget) {
+                parts.push(line);
+            }
+        }
+        if (eof) break;
+    }
+    reader.cancel().catch(() => {});
+    const seq = parts.join('').toUpperCase();
+    contigSeqCache.set(name, seq);
+    return seq;
+}
+
+// Parse one SAM line into a compact read record. Only the first 10 fields are split,
+// so the long QUAL column is never copied. With the contig sequence `ref`, read bases
+// are compared to the reference to find mismatches.
+//   blocks: aligned segments [s0,e0,s1,e1,...], split at deletions >= MIN_GAP_BP
+//   mmPos/mmBase: mismatch positions and read bases
+//   dels: every deletion as [pos,len,...]; ins: every insertion as [pos,len,...]
+function parseSamRead(line, ref) {
+    const f = line.split('\t', 10);
+    if (f.length < 6 || f[5] === '*') return null;
+    const flag = parseInt(f[1], 10);
+    const start = parseInt(f[3], 10) - 1; // SAM is 1-based
+    if (isNaN(flag) || isNaN(start)) return null;
+    const seq = ref && f[9] && f[9] !== '*' ? f[9] : null;
+
+    const blocks = [], dels = [], ins = [], mmPos = [];
+    let mmBase = '';
+    let pos = start, qpos = 0, blockStart = start;
+    for (const [, lenStr, op] of f[5].matchAll(/(\d+)([MIDNSHP=X])/g)) {
+        const len = parseInt(lenStr, 10);
+        switch (op) {
+            case 'M': case '=': case 'X':
+                if (seq) {
+                    for (let i = 0; i < len; i++) {
+                        const rb = ref.charCodeAt(pos + i), qb = seq.charCodeAt(qpos + i) & 0xDF; // uppercase
+                        if (qb !== rb && rb !== 78 && qb !== 78) { mmPos.push(pos + i); mmBase += String.fromCharCode(qb); }
+                    }
+                }
+                pos += len; qpos += len;
+                break;
+            case 'I':
+                ins.push(pos, len);
+                qpos += len;
+                break;
+            case 'D': case 'N':
+                if (op === 'D') dels.push(pos, len);
+                if (len >= MIN_GAP_BP || op === 'N') { blocks.push(blockStart, pos); blockStart = pos + len; }
+                pos += len;
+                break;
+            case 'S':
+                qpos += len;
+                break;
+        }
+    }
+    blocks.push(blockStart, pos);
+
+    return {
+        name: f[0], start, end: pos, mapq: parseInt(f[4], 10) || 0,
+        reverse: (flag & 0x10) !== 0, supplementary: (flag & 0x800) !== 0,
+        blocks, dels: Int32Array.from(dels), ins: Int32Array.from(ins),
+        mmPos: Int32Array.from(mmPos), mmBase
+    };
+}
+
+async function fetchContigReads(contig) {
+    const countOut = await CLI.exec("samtools", ["view", "-c", "-F", EXCLUDE_FLAGS, "output.sorted.bam", contig.name]);
+    const total = parseInt(countOut.trim().split('\n').pop(), 10) || 0;
+
+    const args = ["view", "-F", EXCLUDE_FLAGS];
+    let fraction = 1;
+    if (total > MAX_VIEW_READS) {
+        fraction = MAX_VIEW_READS / total;
+        // samtools -s INT.FRAC: integer part is the seed, fractional part the fraction kept
+        args.push("-s", `42${fraction.toFixed(6).slice(1)}`);
+    }
+    args.push("output.sorted.bam", contig.name);
+    const sam = await CLI.exec("samtools", args);
+
+    // Reference bases for mismatch calling (skipped for very long contigs)
+    let ref = '';
+    if (referenceFile && contig.length <= MAX_SEQ_BP) {
+        ref = await readContigSeq(referenceFile, contig.name);
+        if (ref.length !== contig.length) ref = ''; // name/length mismatch: don't guess
+    }
+
+    const reads = [];
+    for (const line of sam.split('\n')) {
+        const r = parseSamRead(line, ref || null);
+        if (r) reads.push(r);
+    }
+    return { total, fraction, reads, ref };
+}
+
+// One pending payload per opened tab, delivered when that tab reports it's ready
+const readsViews = new Map(); // window -> { ready, payload }
+
+function deliverReads(win) {
+    const v = readsViews.get(win);
+    if (v && v.ready && v.payload) {
+        win.postMessage({ type: 'reads-data', ...v.payload }, window.location.origin);
+        readsViews.delete(win);
+    }
+}
+
+window.addEventListener('message', (e) => {
+    if (e.origin !== window.location.origin || e.data?.type !== 'reads-ready') return;
+    const v = readsViews.get(e.source);
+    if (v) { v.ready = true; deliverReads(e.source); return; }
+    // Unknown tab (e.g. the reads tab was reloaded): fetch again for the contig it names
+    const contig = contigResults.find(c => c.name === e.data.contig);
+    if (contig) sendReadsTo(e.source, contig, true);
+});
+
+async function openReadsView(contig) {
+    // Open the tab synchronously in the click handler so popup blockers allow it
+    const win = window.open(`reads.html#${encodeURIComponent(contig.name)}`, '_blank');
+    if (!win) {
+        alert('Please allow pop-ups for this page to open the reads view.');
+        return;
+    }
+    sendReadsTo(win, contig, false);
+}
+
+async function sendReadsTo(win, contig, ready) {
+    readsViews.set(win, { ready, payload: null });
+    let payload;
+    try {
+        const { total, fraction, reads, ref } = await fetchContigReads(contig);
+        payload = {
+            contig: { name: contig.name, length: contig.length, meandepth: contig.meandepth, coverage: contig.coverage },
+            profile: contig.profile, total, fraction, reads, ref
+        };
+    } catch (err) {
+        console.error(err);
+        payload = { error: String(err?.message || err) };
+    }
+    const v = readsViews.get(win);
+    if (v) { v.payload = payload; deliverReads(win); }
+}
+
+document.getElementById("depthList").addEventListener("click", (e) => {
+    const item = e.target.closest('.depth-item[data-index]');
+    if (!item) return;
+    const contig = contigResults[parseInt(item.dataset.index, 10)];
+    if (contig) openReadsView(contig);
+});
 
 // Attach event listeners
 document.getElementById("btn").addEventListener("click", run);

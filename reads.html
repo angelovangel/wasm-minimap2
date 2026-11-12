@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mapped reads</title>
+    <style>
+        :root {
+            --bg: #f8f9fa;
+            --panel: #ffffff;
+            --text: #343a40;
+            --muted: #868e96;
+            --line: #dee2e6;
+            --accent: #4c9aff;
+            --fwd: #e3a3a3;
+            --rev: #9fbbe6;
+            --supp-outline: #495057;
+            --gap: #6c757d;
+            --ins: #8a3ffc;
+            /* IGV-style base colours */
+            --A: #1a9e3f;
+            --C: #2155d6;
+            --G: #d17105;
+            --T: #d62728;
+            --del: #212529;
+        }
+        html { font-size: 14px; }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            padding: 24px 16px 40px;
+            background: var(--bg);
+            color: var(--text);
+            font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        }
+        .wrap { max-width: 1400px; margin: 0 auto; }
+        h1 { font-size: 1.4rem; font-weight: 500; margin: 0 0 4px; word-break: break-all; }
+        .meta { color: var(--muted); margin-bottom: 14px; }
+        .meta b { color: var(--text); font-weight: 600; }
+
+        .toolbar {
+            display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
+            margin-bottom: 10px;
+        }
+        .toolbar .group { display: flex; align-items: center; gap: 6px; }
+        button, select {
+            font: inherit; font-size: 0.9rem;
+            border: 1px solid var(--line); background: var(--panel); color: var(--text);
+            padding: 3px 10px; cursor: pointer; border-radius: 0;
+        }
+        button:hover { background: #e9ecef; }
+        #region { font-variant-numeric: tabular-nums; color: var(--muted); }
+
+        .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 0.85rem; }
+        .legend span { display: inline-flex; align-items: center; gap: 5px; }
+        .sw { display: inline-block; width: 18px; height: 6px; }
+        .base { font-weight: 700; font-family: ui-monospace, Menlo, monospace; }
+
+        .panel { background: var(--panel); border: 1px solid var(--line); padding: 8px 0 8px; }
+        canvas { display: block; width: 100%; }
+        #reads-canvas { cursor: grab; }
+        #reads-canvas.dragging { cursor: grabbing; }
+        .hint { color: var(--muted); font-size: 0.8rem; margin-top: 6px; }
+
+        #status { padding: 40px 0; color: var(--muted); }
+        #status.error { color: #b02a37; }
+
+        #tooltip {
+            position: fixed; pointer-events: none; display: none; z-index: 10;
+            background: rgba(0, 0, 0, 0.8); color: #fff; font-size: 12px; line-height: 1.4;
+            padding: 5px 8px; border-radius: 3px; white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <h1 id="title">Mapped reads</h1>
+    <div class="meta" id="meta"></div>
+    <div id="status">Loading reads…</div>
+
+    <div id="viewer" hidden>
+        <div class="toolbar">
+            <div class="group">
+                <button id="zoom-out" title="Zoom out">−</button>
+                <button id="zoom-in" title="Zoom in">+</button>
+                <button id="zoom-reset" title="Show whole contig">Whole contig</button>
+            </div>
+            <div class="group">
+                <label for="row-height">Row height</label>
+                <select id="row-height">
+                    <option value="1">1 px</option>
+                    <option value="5" selected>5 px</option>
+                    <option value="10">10 px</option>
+                </select>
+            </div>
+            <div class="group" title="Reads that don't fit are hidden from the pile only; depth and consensus still use all loaded reads">
+                <label for="max-rows">Max depth</label>
+                <select id="max-rows">
+                    <option value="100">100</option>
+                    <option value="250" selected>250</option>
+                    <option value="500">500</option>
+                    <option value="1000">1000</option>
+                    <option value="0">all</option>
+                </select>
+            </div>
+            <span id="region"></span>
+        </div>
+        <div class="legend">
+            <span><i class="sw" style="background:var(--fwd)"></i>forward</span>
+            <span><i class="sw" style="background:var(--rev)"></i>reverse</span>
+            <span><i class="sw" style="background:var(--fwd);opacity:.35"></i>MAPQ 0</span>
+            <span><i class="sw" style="background:var(--fwd);box-shadow:inset 0 0 0 1px var(--supp-outline)"></i>supplementary</span>
+            <span>mismatch
+                <b class="base" style="color:var(--A)">A</b><b class="base" style="color:var(--C)">C</b><b class="base" style="color:var(--G)">G</b><b class="base" style="color:var(--T)">T</b></span>
+            <span><i class="sw" style="height:1px;background:var(--del)"></i>deletion</span>
+            <span><i class="sw" style="width:2px;height:8px;background:var(--ins)"></i>insertion</span>
+        </div>
+        <div class="panel" style="margin-top:8px">
+            <canvas id="cov-canvas"></canvas>
+            <canvas id="reads-canvas"></canvas>
+        </div>
+        <div class="hint" id="hint">Drag to pan, use the buttons or Ctrl/⌘ + scroll to zoom, hover a read or the coverage for details.</div>
+    </div>
+</div>
+<div id="tooltip"></div>
+
+<script>
+(() => {
+    // Keep MIN_GAP_BP / MIN_INS_BP in sync with script.js
+    const MIN_GAP_BP = 20, MIN_INS_BP = 20;
+    const DETAIL_SPAN = 20000;   // per-base counts, allele colours and consensus below this span
+    const MM_MAX_BPPX = 10;      // draw read mismatches/small indels when <= this many bp per pixel
+    const ALLELE_FRAC = 0.2;     // highlight a coverage column when >= 20% of reads disagree (as IGV)
+    const COV_H = 90, RULER_H = 22, CONS_H = 24, ROW_GAP = 1;
+
+    const css = getComputedStyle(document.documentElement);
+    const C = name => css.getPropertyValue(name).trim();
+    const COL = {
+        fwd: C('--fwd'), rev: C('--rev'), supp: C('--supp-outline'), gap: C('--gap'),
+        ins: C('--ins'), accent: C('--accent'), line: C('--line'), muted: C('--muted'), text: C('--text'),
+        A: C('--A'), C: C('--C'), G: C('--G'), T: C('--T'), del: C('--del'), panel: C('--panel')
+    };
+    const BASES = ['A', 'C', 'G', 'T'];
+    const baseColor = b => COL[b] || COL.muted;
+
+    const $ = id => document.getElementById(id);
+    const status = $('status');
+    const covCanvas = $('cov-canvas'), readsCanvas = $('reads-canvas');
+    const tooltip = $('tooltip');
+
+    const contigName = decodeURIComponent(location.hash.slice(1));
+    if (contigName) { $('title').textContent = contigName; document.title = `${contigName} · reads`; }
+
+    function fmtBp(bp) {
+        if (bp >= 1e6) return `${+(bp / 1e6).toFixed(2)} Mb`;
+        if (bp >= 1e3) return `${+(bp / 1e3).toFixed(1)} kb`;
+        return `${Math.round(bp)} bp`;
+    }
+    function niceStep(span, target) {
+        const raw = span / Math.max(1, target);
+        const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+        const n = raw / mag;
+        return (n < 1.5 ? 1 : n < 3.5 ? 2 : n < 7.5 ? 5 : 10) * mag;
+    }
+    const esc = s => String(s).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+
+    // ---- state ----
+    let data = null;          // payload from the main page
+    let rows = [];            // rows[i] = reads packed into row i, sorted by start
+    let view = { start: 0, end: 1 };
+    let rowH = 5;
+    let maxRows = 250;        // 0 = no limit
+    let hiddenReads = 0;      // reads left out of the pile by the depth limit
+    let counts = null;        // per-base counts for the detail window (see computeCounts)
+
+    // Greedy packing: each read goes into the first row whose last read ends before it starts.
+    // With a row limit, reads that find no free row are left out (IGV-style downsampling):
+    // this trims only where the pile is deeper than the limit. Reads starting at the same
+    // position are taken in random order so the choice isn't biased by file order.
+    function pack(reads, length, limit) {
+        const pad = Math.max(1, Math.round(length / 2000)); // small horizontal gap between reads
+        const sorted = reads.map(r => [r, Math.random()])
+            .sort((a, b) => a[0].start - b[0].start || a[1] - b[1])
+            .map(x => x[0]);
+        const rowEnds = [];
+        const out = [];
+        let hidden = 0;
+        for (const r of sorted) {
+            let i = rowEnds.findIndex(e => e + pad <= r.start);
+            if (i === -1) {
+                if (limit && rowEnds.length >= limit) { hidden++; continue; }
+                i = rowEnds.length; rowEnds.push(0); out.push([]);
+            }
+            rowEnds[i] = r.end;
+            out[i].push(r);
+        }
+        return { rows: out, hidden };
+    }
+
+    function repack() {
+        const res = pack(data.reads, data.contig.length, maxRows);
+        rows = res.rows;
+        hiddenReads = res.hidden;
+        $('downsample-note').textContent = hiddenReads
+            ? ` · ${hiddenReads.toLocaleString()} hidden from the pile to keep depth ≤ ${maxRows}`
+            : '';
+    }
+
+    // Per-base counts over [s, e) from all loaded reads (including any hidden from the pile):
+    //   depth (reads spanning, excl. deletions), del, A/C/G/T, consensus base per position.
+    // Reference bases come from data.ref; reads only carry their mismatches.
+    function computeCounts(s, e) {
+        s = Math.max(0, Math.floor(s)); e = Math.min(data.contig.length, Math.ceil(e));
+        const n = e - s;
+        // Difference arrays (+1 at start, -1 at end) so each read costs O(its features), not O(length)
+        const span = new Int32Array(n + 1);     // reads whose aligned blocks cover the base
+        const smallDel = new Int32Array(n + 1); // short deletions (inside a block)
+        const longDel = new Int32Array(n + 1);  // long deletions (gap between blocks)
+        const mm = { A: new Int32Array(n), C: new Int32Array(n), G: new Int32Array(n), T: new Int32Array(n) };
+        const addRange = (arr, a, b) => {
+            a = Math.max(a, s); b = Math.min(b, e);
+            if (a < b) { arr[a - s]++; arr[b - s]--; }
+        };
+        for (const r of data.reads) {
+            if (r.end <= s || r.start >= e) continue;
+            for (let b = 0; b < r.blocks.length; b += 2) addRange(span, r.blocks[b], r.blocks[b + 1]);
+            for (let d = 0; d < r.dels.length; d += 2) {
+                const p = r.dels[d], len = r.dels[d + 1];
+                addRange(len < MIN_GAP_BP ? smallDel : longDel, p, p + len);
+            }
+            for (let m = 0; m < r.mmPos.length; m++) {
+                const p = r.mmPos[m], b = r.mmBase[m];
+                if (p >= s && p < e && mm[b]) mm[b][p - s]++;
+            }
+        }
+        const depth = new Int32Array(n), del = new Int32Array(n);
+        const cnt = { A: new Int32Array(n), C: new Int32Array(n), G: new Int32Array(n), T: new Int32Array(n) };
+        const ref = new Array(n), cons = new Array(n), alt = new Float32Array(n);
+        let sp = 0, sd = 0, ld = 0;
+        for (let i = 0; i < n; i++) {
+            sp += span[i]; sd += smallDel[i]; ld += longDel[i];
+            const aligned = Math.max(0, sp - sd);   // reads with a base here
+            const dels = sd + ld;                   // reads with a deletion here
+            const rb = data.ref[s + i];
+            let mmSum = 0;
+            for (const b of BASES) { cnt[b][i] = mm[b][i]; mmSum += mm[b][i]; }
+            if (cnt[rb]) cnt[rb][i] += Math.max(0, aligned - mmSum); // the rest match the reference
+            depth[i] = aligned; del[i] = dels; ref[i] = rb;
+            // consensus = most common of A/C/G/T/deletion
+            let best = '', bestN = 0;
+            for (const b of BASES) if (cnt[b][i] > bestN) { best = b; bestN = cnt[b][i]; }
+            if (dels > bestN) best = '-';
+            cons[i] = best;
+            const tot = aligned + dels;
+            alt[i] = tot > 0 && cnt[rb] ? 1 - cnt[rb][i] / tot : 0;
+        }
+        return { s, e, depth, del, cnt, ref, cons, alt };
+    }
+
+    function setupCanvas(canvas, cssHeight) {
+        const dpr = window.devicePixelRatio || 1;
+        const w = canvas.clientWidth;
+        canvas.style.height = `${cssHeight}px`;
+        canvas.width = Math.round(w * dpr);
+        canvas.height = Math.round(cssHeight * dpr);
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        return { ctx, w };
+    }
+
+    const xOf = (bp, w) => (bp - view.start) / (view.end - view.start) * w;
+
+    function drawTopTracks() {
+        const { ctx, w } = setupCanvas(covCanvas, COV_H + RULER_H + CONS_H);
+        const L = data.contig.length;
+        const pxPerBp = w / (view.end - view.start);
+        ctx.font = '10px system-ui, sans-serif';
+        ctx.textBaseline = 'top';
+
+        if (counts) {
+            // Per-base coverage from the displayed reads, with allele colours where reads disagree
+            let max = 1;
+            for (let i = 0; i < counts.depth.length; i++) max = Math.max(max, counts.depth[i] + counts.del[i]);
+            const n = counts.depth.length;
+            for (let i = 0; i < n; i++) {
+                const tot = counts.depth[i] + counts.del[i];
+                if (!tot) continue;
+                const x0 = xOf(counts.s + i, w), x1 = xOf(counts.s + i + 1, w);
+                const bw = Math.max(1, x1 - x0 - (pxPerBp > 4 ? 1 : 0));
+                const h = tot / max * (COV_H - 4);
+                if (counts.alt[i] >= ALLELE_FRAC) {
+                    // stacked bar of A/C/G/T/del proportions
+                    let y = COV_H;
+                    for (const b of [...BASES, '-']) {
+                        const c = b === '-' ? counts.del[i] : counts.cnt[b][i];
+                        if (!c) continue;
+                        const bh = c / max * (COV_H - 4);
+                        ctx.fillStyle = b === '-' ? COL.del : baseColor(b);
+                        ctx.fillRect(x0, y - bh, bw, bh);
+                        y -= bh;
+                    }
+                } else {
+                    ctx.fillStyle = '#b8c4d6';
+                    ctx.fillRect(x0, COV_H - h, bw, h);
+                }
+            }
+            ctx.fillStyle = COL.muted;
+            ctx.fillText(`depth of loaded reads (max ${max})`, 6, 2);
+        } else {
+            // Overview: binned depth profile (computed on all reads, not the subsample)
+            const prof = data.profile || [];
+            if (prof.length) {
+                const bin = Math.max(1, Math.ceil(L / prof.length));
+                const max = Math.max(1, ...prof);
+                ctx.fillStyle = COL.accent + '55';
+                ctx.strokeStyle = COL.accent;
+                ctx.beginPath();
+                ctx.moveTo(xOf(0, w), COV_H);
+                prof.forEach((d, i) => {
+                    const y = COV_H - (d / max) * (COV_H - 4);
+                    ctx.lineTo(xOf(i * bin, w), y);
+                    ctx.lineTo(xOf(Math.min((i + 1) * bin, L), w), y);
+                });
+                ctx.lineTo(xOf(L, w), COV_H);
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+                ctx.fillStyle = COL.muted;
+                ctx.fillText(`depth, all reads (max ${Math.round(max)})`, 6, 2);
+            }
+        }
+
+        // Ruler
+        const ry = COV_H;
+        ctx.strokeStyle = COL.line;
+        ctx.beginPath();
+        ctx.moveTo(0, ry + 4.5); ctx.lineTo(w, ry + 4.5);
+        ctx.stroke();
+        const span = view.end - view.start;
+        const step = Math.max(1, niceStep(span, Math.max(2, Math.round(w / 110))));
+        ctx.fillStyle = COL.muted;
+        for (let p = Math.ceil(view.start / step) * step; p <= view.end; p += step) {
+            const x = Math.round(xOf(p, w)) + 0.5;
+            ctx.beginPath(); ctx.moveTo(x, ry + 4); ctx.lineTo(x, ry + 8); ctx.stroke();
+            const label = span <= 2000 ? p.toLocaleString() : fmtBp(p);
+            const tw = ctx.measureText(label).width;
+            ctx.fillText(label, Math.min(Math.max(0, x - tw / 2), w - tw), ry + 10);
+        }
+
+        // Consensus of the shown reads (letters when zoomed far enough, coloured blocks otherwise).
+        // Bases agreeing with the reference are faded; disagreements are drawn at full strength.
+        const cy = COV_H + RULER_H;
+        if (counts && pxPerBp >= 1) {
+            ctx.font = 'bold 14px ui-monospace, Menlo, monospace';
+            ctx.textAlign = 'center';
+            for (let i = 0; i < counts.cons.length; i++) {
+                const b = counts.cons[i];
+                if (!b) continue;
+                const x0 = xOf(counts.s + i, w), x1 = xOf(counts.s + i + 1, w);
+                const differs = counts.ref[i] && b !== counts.ref[i];
+                ctx.globalAlpha = differs ? 1 : 0.45;
+                ctx.fillStyle = b === '-' ? COL.del : baseColor(b);
+                if (pxPerBp >= 8) {
+                    ctx.fillText(b, (x0 + x1) / 2, cy + 3);
+                    if (differs) ctx.fillRect(x0 + 1, cy + CONS_H - 2, Math.max(1, x1 - x0 - 2), 2);
+                } else {
+                    ctx.fillRect(x0, cy + 4, Math.max(1, x1 - x0), CONS_H - 8);
+                }
+            }
+            ctx.globalAlpha = 1;
+            ctx.textAlign = 'left';
+        } else {
+            ctx.fillStyle = COL.muted;
+            ctx.fillText(data.ref ? 'consensus: zoom in to see bases' : 'consensus unavailable (reference sequence not loaded)', 6, cy + 3);
+        }
+    }
+
+    function drawReads() {
+        const pitch = rowH + ROW_GAP;
+        const { ctx, w } = setupCanvas(readsCanvas, Math.max(20, rows.length * pitch + 4));
+        const bpPerPx = (view.end - view.start) / w;
+        const pxPerBp = 1 / bpPerPx;
+        const detail = bpPerPx <= MM_MAX_BPPX;
+        const letters = rowH >= 10 && pxPerBp >= 8;
+        ctx.font = 'bold 9px ui-monospace, Menlo, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        rows.forEach((row, ri) => {
+            const y = ri * pitch + 2;
+            for (const r of row) {
+                if (r.end < view.start || r.start > view.end) continue;
+                ctx.globalAlpha = r.mapq === 0 ? 0.35 : 1;
+                // thin line under the whole read, so long deletions show as gaps
+                if (r.blocks.length > 2) {
+                    ctx.fillStyle = COL.del;
+                    const x0 = xOf(r.start, w), x1 = xOf(r.end, w);
+                    ctx.fillRect(x0, y + Math.floor(rowH / 2), Math.max(1, x1 - x0), 1);
+                }
+                ctx.fillStyle = r.reverse ? COL.rev : COL.fwd;
+                for (let b = 0; b < r.blocks.length; b += 2) {
+                    const x0 = xOf(r.blocks[b], w), x1 = xOf(r.blocks[b + 1], w);
+                    ctx.fillRect(x0, y, Math.max(1, x1 - x0), rowH);
+                }
+                if (r.supplementary && rowH >= 5) {
+                    ctx.strokeStyle = COL.supp;
+                    const x0 = xOf(r.start, w), x1 = xOf(r.end, w);
+                    ctx.strokeRect(x0 + 0.5, y + 0.5, Math.max(1, x1 - x0) - 1, rowH - 1);
+                }
+                if (detail) {
+                    // short deletions: cut the read and draw a thin line across the gap
+                    for (let d = 0; d < r.dels.length; d += 2) {
+                        const p = r.dels[d], len = r.dels[d + 1];
+                        if (len >= MIN_GAP_BP || p + len < view.start || p > view.end) continue;
+                        const x0 = xOf(p, w), x1 = xOf(p + len, w);
+                        ctx.fillStyle = COL.panel;
+                        ctx.fillRect(x0, y, Math.max(1, x1 - x0), rowH);
+                        ctx.fillStyle = COL.del;
+                        ctx.fillRect(x0, y + Math.floor(rowH / 2), Math.max(1, x1 - x0), 1);
+                    }
+                    // mismatches, coloured by the read's base
+                    for (let m = 0; m < r.mmPos.length; m++) {
+                        const p = r.mmPos[m];
+                        if (p < view.start - 1 || p > view.end) continue;
+                        const x0 = xOf(p, w), b = r.mmBase[m];
+                        if (letters) {
+                            ctx.fillStyle = baseColor(b);
+                            ctx.fillText(b, x0 + pxPerBp / 2, y + rowH / 2 + 0.5);
+                        } else {
+                            ctx.fillStyle = baseColor(b);
+                            ctx.fillRect(x0, y, Math.max(1, pxPerBp), rowH);
+                        }
+                    }
+                }
+                // insertions: all of them when zoomed in, only long ones further out
+                if (r.ins.length && bpPerPx < 50) {
+                    ctx.fillStyle = COL.ins;
+                    for (let k = 0; k < r.ins.length; k += 2) {
+                        if (!detail && r.ins[k + 1] < MIN_INS_BP) continue;
+                        const p = r.ins[k];
+                        if (p < view.start || p > view.end) continue;
+                        ctx.fillRect(xOf(p, w) - 0.75, y - (rowH > 1 ? 1 : 0), 1.5, rowH + (rowH > 1 ? 2 : 0));
+                    }
+                }
+            }
+        });
+        ctx.globalAlpha = 1;
+    }
+
+    function render() {
+        const span = view.end - view.start;
+        counts = data.ref && span <= DETAIL_SPAN ? computeCounts(view.start, view.end) : null;
+        drawTopTracks();
+        drawReads();
+        $('region').textContent = `${fmtBp(view.start)} – ${fmtBp(view.end)}  (${fmtBp(span)} shown)`;
+    }
+
+    function setView(start, end) {
+        const L = data.contig.length;
+        const minSpan = Math.min(L, 40);
+        const span = Math.max(minSpan, Math.min(L, end - start));
+        start = Math.max(0, Math.min(L - span, start));
+        view = { start, end: start + span };
+        render();
+    }
+
+    function zoomAt(factor, centerBp) {
+        const span = (view.end - view.start) * factor;
+        const frac = (centerBp - view.start) / (view.end - view.start);
+        setView(centerBp - frac * span, centerBp - frac * span + span);
+    }
+
+    // ---- interaction ----
+    function bpAtEvent(e, canvas) {
+        const rect = canvas.getBoundingClientRect();
+        return view.start + (e.clientX - rect.left) / rect.width * (view.end - view.start);
+    }
+
+    // Plain scrolling scrolls the page; zoom only with Ctrl/⌘ + scroll or a trackpad pinch
+    // (browsers report a pinch as a wheel event with ctrlKey set).
+    function onWheel(e) {
+        if (!data || !(e.ctrlKey || e.metaKey)) return;
+        e.preventDefault();
+        zoomAt(e.deltaY > 0 ? 1.25 : 0.8, bpAtEvent(e, e.currentTarget));
+    }
+    covCanvas.addEventListener('wheel', onWheel, { passive: false });
+    readsCanvas.addEventListener('wheel', onWheel, { passive: false });
+
+    let drag = null;
+    readsCanvas.addEventListener('mousedown', e => {
+        drag = { x: e.clientX, start: view.start, end: view.end };
+        readsCanvas.classList.add('dragging');
+    });
+    window.addEventListener('mouseup', () => { drag = null; readsCanvas.classList.remove('dragging'); });
+    window.addEventListener('mousemove', e => {
+        if (!drag) return;
+        const bpPerPx = (drag.end - drag.start) / readsCanvas.clientWidth;
+        const shift = (drag.x - e.clientX) * bpPerPx;
+        setView(drag.start + shift, drag.end + shift);
+    });
+
+    function showTooltip(html, e) {
+        tooltip.innerHTML = html;
+        tooltip.style.display = 'block';
+        const tx = Math.min(e.clientX + 12, window.innerWidth - tooltip.offsetWidth - 8);
+        tooltip.style.left = `${tx}px`;
+        tooltip.style.top = `${e.clientY + 14}px`;
+    }
+    const hideTooltip = () => { tooltip.style.display = 'none'; };
+
+    readsCanvas.addEventListener('mousemove', e => {
+        if (!data || drag) return hideTooltip();
+        const rect = readsCanvas.getBoundingClientRect();
+        const ri = Math.floor((e.clientY - rect.top - 2) / (rowH + ROW_GAP));
+        const bp = bpAtEvent(e, readsCanvas);
+        const tol = (view.end - view.start) / rect.width * 2; // ~2 px tolerance
+        const r = rows[ri]?.find(r => bp >= r.start - tol && bp <= r.end + tol);
+        if (!r) return hideTooltip();
+        const alnLen = r.end - r.start;
+        const mmRate = data.ref && alnLen ? ` · ${(r.mmPos.length / alnLen * 100).toFixed(1)}% mismatches` : '';
+        showTooltip(
+            `<b>${esc(r.name)}</b><br>` +
+            `${(r.start + 1).toLocaleString()}–${r.end.toLocaleString()} (${fmtBp(alnLen)})<br>` +
+            `${r.reverse ? 'reverse' : 'forward'} · MAPQ ${r.mapq}${r.supplementary ? ' · supplementary' : ''}${mmRate}`, e);
+    });
+    readsCanvas.addEventListener('mouseleave', hideTooltip);
+
+    // Coverage/consensus hover: base counts at that position
+    covCanvas.addEventListener('mousemove', e => {
+        if (!counts) return hideTooltip();
+        const i = Math.floor(bpAtEvent(e, covCanvas)) - counts.s;
+        if (i < 0 || i >= counts.depth.length) return hideTooltip();
+        const tot = counts.depth[i] + counts.del[i];
+        const parts = BASES.map(b => `<span style="color:${baseColor(b)}">${b}</span> ${counts.cnt[b][i]}`).join(' · ');
+        showTooltip(
+            `<b>${(counts.s + i + 1).toLocaleString()}</b> · ref <b>${counts.ref[i] || '?'}</b> · consensus <b>${counts.cons[i] || '–'}</b><br>` +
+            `depth ${tot} · ${(counts.alt[i] * 100).toFixed(0)}% disagree<br>${parts} · del ${counts.del[i]}`, e);
+    });
+    covCanvas.addEventListener('mouseleave', hideTooltip);
+
+    $('zoom-in').addEventListener('click', () => zoomAt(0.5, (view.start + view.end) / 2));
+    $('zoom-out').addEventListener('click', () => zoomAt(2, (view.start + view.end) / 2));
+    $('zoom-reset').addEventListener('click', () => setView(0, data.contig.length));
+    $('row-height').addEventListener('change', e => { rowH = parseInt(e.target.value, 10); render(); });
+    $('max-rows').addEventListener('change', e => { maxRows = parseInt(e.target.value, 10); if (data) { repack(); render(); } });
+
+    let resizeTimer;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => data && render(), 100);
+    });
+
+    // ---- data handoff from the main page ----
+    function show(payload) {
+        if (payload.error) {
+            status.textContent = `Could not load reads: ${payload.error}`;
+            status.classList.add('error');
+            return;
+        }
+        data = payload;
+        const c = data.contig;
+        const shown = data.reads.length;
+        $('meta').innerHTML =
+            `<b>${fmtBp(c.length)}</b> · mean depth <b>${esc(c.meandepth)}</b> · covered <b>${esc(c.coverage)}%</b> · ` +
+            (data.fraction < 1
+                ? `showing <b>${shown.toLocaleString()}</b> of ${data.total.toLocaleString()} reads (random ${(data.fraction * 100).toFixed(1)}% subsample)`
+                : `<b>${shown.toLocaleString()}</b> reads`) +
+            '<span id="downsample-note"></span>' +
+            (data.ref ? '' : ' · <i>reference sequence not available: mismatches and consensus are off</i>');
+        $('hint').textContent =
+            `Drag to pan; zoom with the buttons, Ctrl/⌘ + scroll or a trackpad pinch. Below ${fmtBp(DETAIL_SPAN)} the coverage shows per-base counts ` +
+            `(coloured where ≥ ${ALLELE_FRAC * 100}% of reads disagree) and the consensus appears; ` +
+            `zoom further to see mismatches on reads and consensus letters. Hover for details.`;
+        status.hidden = true;
+        $('viewer').hidden = false;
+        repack();
+        view = { start: 0, end: c.length };
+        render();
+    }
+
+    window.addEventListener('message', e => {
+        if (e.origin !== location.origin || e.data?.type !== 'reads-data') return;
+        show(e.data);
+    });
+
+    if (window.opener) {
+        window.opener.postMessage({ type: 'reads-ready', contig: contigName }, location.origin);
+    } else {
+        status.textContent = 'This view needs the main page that opened it. Click a contig there to reopen it.';
+    }
+})();
+</script>
+</body>
+</html>

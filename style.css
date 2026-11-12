@@ -183,3 +183,59 @@ h1 {
     border-radius: 3px !important;
     box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2) !important;
 }
+/* Progress indicator: thin flat bar with a soft moving sheen (no stripes) */
+.run-progress {
+    max-width: 640px;
+    margin: 4px 0 20px;
+}
+.run-progress-text {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    font-size: 0.9rem;
+    color: #495057;
+}
+#progress-elapsed {
+    color: #adb5bd;
+    font-variant-numeric: tabular-nums;
+}
+.run-progress-track {
+    height: 4px;
+    background-color: #e9ecef;
+    overflow: hidden;
+}
+.run-progress-fill {
+    position: relative;
+    height: 100%;
+    background-color: #4c9aff;
+    transition: width 0.4s ease;
+    overflow: hidden;
+}
+.run-progress-fill::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.6), transparent);
+    transform: translateX(-100%);
+    animation: run-progress-sheen 1.6s ease-in-out infinite;
+}
+@keyframes run-progress-sheen {
+    to { transform: translateX(100%); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .run-progress-fill::after { animation: none; }
+}
+
+/* Contig rows open the reads view on click */
+.depth-item.clickable {
+    cursor: pointer;
+}
+.depth-item.clickable:hover {
+    background-color: #f1f6ff;
+}
+.depth-item.clickable .contig-name {
+    color: #0b5ed7;
+}
+.depth-item.clickable:hover .contig-name {
+    text-decoration: underline;
+}
