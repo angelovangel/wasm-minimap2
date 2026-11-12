@@ -14,7 +14,7 @@
 <body>
     <div class="container">
         <h2 class="mb-4">minimap2 in the browser</h2>
-        <div class="row">
+        <div class="row" id="inputs">
             <div class="col-md-5 file-input">
                 <label for="ref" class="form-label fw-bold">1. Reference (.fasta/.fa)</label>
                 <input type="file" id="ref" class="form-control" accept=".fasta,.fa">
@@ -26,7 +26,7 @@
             </div>
 
             <div class="col-md-2 file-input">
-                <label for="subsample" class="form-label fw-bold">3. Reads used</label>
+                <label for="subsample" class="form-label fw-bold">3. Use reads</label>
                 <div class="input-group" title="Randomly subsample each fastq (seqtk, fixed seed). 100% = use all reads.">
                     <input type="number" id="subsample" class="form-control" value="100" min="0.1" max="100" step="any">
                     <span class="input-group-text">%</span>

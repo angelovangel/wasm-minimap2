@@ -1,4 +1,9 @@
 /* Global & Typography */
+/* Base size for the whole page: Bootstrap sizes everything (inputs, buttons,
+   alerts, headings) in rem, so this scales all of it down together. */
+html {
+    font-size: 14px;
+}
 body { 
     padding-top: 30px; 
     padding-bottom: 30px; 
@@ -80,7 +85,7 @@ h1 {
 .depth-item {
     display: flex;
     align-items: center;
-    font-size: 0.85rem;
+    font-size: 0.95rem; /* ~13px */
     padding: 10px 15px;
     border-bottom: 1px solid #e9ecef;
     margin-bottom: 0;
@@ -107,7 +112,7 @@ h1 {
     color: #6c757d !important;
     font-weight: 500;
     /*font-size: 13px;*/
-    font-size: 0.75rem;
+    font-size: 0.85rem; /* ~12px */
     text-transform: uppercase;
     text-align: right;
     letter-spacing: 0.3px;

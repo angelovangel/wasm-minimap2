@@ -340,6 +340,9 @@ async function run() {
         // --- SPARKLINE RENDERING ---
         renderSparklines(); 
         outputDiv.innerHTML = ''; // done: remove progress bar
+        // Results are shown: hide the inputs and Run button (RESET starts over)
+        document.getElementById("inputs").style.display = 'none';
+        document.getElementById("btn").style.display = 'none';
 
     } catch (error) {
         console.error(error);
