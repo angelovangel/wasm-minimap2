@@ -519,7 +519,7 @@ async function sendReadsTo(win, contig, ready) {
         const { total, fraction, reads, ref } = await fetchContigReads(contig);
         payload = {
             contig: { name: contig.name, length: contig.length, meandepth: contig.meandepth, coverage: contig.coverage },
-            profile: contig.profile, total, fraction, reads, ref
+            profile: contig.profile, total, fraction, reads, ref, limit: MAX_VIEW_READS
         };
     } catch (err) {
         console.error(err);

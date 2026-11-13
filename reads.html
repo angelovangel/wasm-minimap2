@@ -50,6 +50,7 @@
         }
         button:hover { background: #e9ecef; }
         #region { font-variant-numeric: tabular-nums; color: var(--muted); }
+        #downsample-note { color: var(--muted); font-size: 0.85rem; }
 
         .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 0.85rem; }
         .legend span { display: inline-flex; align-items: center; gap: 5px; }
@@ -102,6 +103,7 @@
                     <option value="1000">1000</option>
                     <option value="0">all</option>
                 </select>
+                <span id="downsample-note"></span>
             </div>
             <span id="region"></span>
         </div>
@@ -201,9 +203,7 @@
         const res = pack(data.reads, data.contig.length, maxRows);
         rows = res.rows;
         hiddenReads = res.hidden;
-        $('downsample-note').textContent = hiddenReads
-            ? ` · ${hiddenReads.toLocaleString()} hidden from the pile to keep depth ≤ ${maxRows}`
-            : '';
+        $('downsample-note').textContent = hiddenReads ? `${hiddenReads.toLocaleString()} not drawn` : '';
     }
 
     // Per-base counts over [s, e) from all loaded reads (including any hidden from the pile):
@@ -563,9 +563,8 @@
         $('meta').innerHTML =
             `<b>${fmtBp(c.length)}</b> · mean depth <b>${esc(c.meandepth)}</b> · covered <b>${esc(c.coverage)}%</b> · ` +
             (data.fraction < 1
-                ? `showing <b>${shown.toLocaleString()}</b> of ${data.total.toLocaleString()} reads (random ${(data.fraction * 100).toFixed(1)}% subsample)`
+                ? `<b>${shown.toLocaleString()}</b> of ${data.total.toLocaleString()} reads loaded (limit ${(data.limit || 3000).toLocaleString()})`
                 : `<b>${shown.toLocaleString()}</b> reads`) +
-            '<span id="downsample-note"></span>' +
             (data.ref ? '' : ' · <i>reference sequence not available: mismatches and consensus are off</i>');
         $('hint').textContent =
             `Drag to pan; zoom with the buttons, Ctrl/⌘ + scroll or a trackpad pinch. Below ${fmtBp(DETAIL_SPAN)} the coverage shows per-base counts ` +
