@@ -15,12 +15,12 @@
     <div class="container">
         <h2 class="mb-4">minimap2 in the browser</h2>
         <div class="row" id="inputs">
-            <div class="col-md-5 file-input">
+            <div class="col-md-4 file-input">
                 <label for="ref" class="form-label fw-bold">1. Reference (.fasta/.fa)</label>
                 <input type="file" id="ref" class="form-control" accept=".fasta,.fa">
             </div>
 
-            <div class="col-md-5 file-input">
+            <div class="col-md-4 file-input">
                 <label for="query" class="form-label fw-bold">2. Query Reads (.fastq/.fq)</label>
                 <input type="file" id="query" class="form-control" multiple accept=".fastq,.gz">
             </div>
@@ -32,6 +32,19 @@
                     <span class="input-group-text">%</span>
                 </div>
             </div>
+
+            <div class="col-md-2 file-input">
+                <label for="preset" class="form-label fw-bold">4. Preset</label>
+                <select id="preset" class="form-select" title="minimap2 -x preset">
+                    <option value="map-ont" selected>map-ont (Nanopore)</option>
+                    <option value="map-hifi">map-hifi (PacBio HiFi)</option>
+                    <option value="map-pb">map-pb (PacBio CLR)</option>
+                    <option value="sr">sr (short reads)</option>
+                    <option value="asm5">asm5 (assembly, ~0.1% div.)</option>
+                    <option value="asm20">asm20 (assembly, ~5% div.)</option>
+                    <option value="splice">splice (spliced RNA)</option>
+                </select>
+            </div>
         </div>
         
         <div class="action-buttons">
@@ -41,9 +54,11 @@
             <button id="reset-btn" class="btn btn-secondary btn me-3">
                 <i class="fas fa-redo"></i> RESET
             </button>
-            <a id="download-bam" href="#" class="btn btn-success btn" style="display: none;" download="output.sorted.bam">
+            <a id="download-bam" href="#" class="btn btn-success btn me-2" style="display: none;" download="output.sorted.bam">
                 <i class="fas fa-download"></i> Download BAM
             </a>
+            <button id="download-csv" class="btn btn-outline-secondary me-2" style="display: none;">Stats CSV</button>
+            <button id="download-unmapped" class="btn btn-outline-secondary" style="display: none;">Unmapped FASTQ</button>
         </div>
         
         <div id="output">
