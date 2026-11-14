@@ -34,27 +34,31 @@
             font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
         }
         .wrap { max-width: 1400px; margin: 0 auto; }
-        h1 { font-size: 1.4rem; font-weight: 500; margin: 0 0 4px; word-break: break-all; }
-        .meta { color: var(--muted); margin-bottom: 14px; }
+        /* Contig name and its summary on one line (wraps on narrow screens) */
+        .title-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 14px; margin-bottom: 12px; }
+        h1 { font-size: 1.4rem; font-weight: 500; margin: 0; word-break: break-all; }
+        .meta { color: var(--muted); }
         .meta b { color: var(--text); font-weight: 600; }
 
+        /* One compact row of controls; wraps only on narrow screens */
         .toolbar {
-            display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
-            margin-bottom: 10px;
+            display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px;
+            margin-bottom: 10px; font-size: 0.85rem;
         }
-        .toolbar .group { display: flex; align-items: center; gap: 6px; }
+        .toolbar .group { display: flex; align-items: center; gap: 4px; margin: 0; }
+        .toolbar label { color: var(--muted); }
+        .toolbar .sep { width: 1px; height: 18px; background: var(--line); }
         button, select {
-            font: inherit; font-size: 0.9rem;
+            font: inherit; font-size: 0.85rem;
             border: 1px solid var(--line); background: var(--panel); color: var(--text);
-            padding: 3px 10px; cursor: pointer; border-radius: 0;
+            padding: 2px 7px; cursor: pointer; border-radius: 0;
         }
         button:hover { background: #e9ecef; }
-        #region { font-variant-numeric: tabular-nums; color: var(--muted); }
-        #downsample-note, #group-note { color: var(--muted); font-size: 0.85rem; }
+        .note { color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
         #cov-canvas { cursor: crosshair; }
         input[type=text] {
-            font: inherit; font-size: 0.9rem; border: 1px solid var(--line);
-            background: var(--panel); color: var(--text); padding: 3px 8px; border-radius: 0;
+            font: inherit; font-size: 0.85rem; border: 1px solid var(--line);
+            background: var(--panel); color: var(--text); padding: 2px 6px; border-radius: 0;
         }
         button:disabled { opacity: 0.5; cursor: default; }
         label.group { cursor: pointer; }
@@ -94,8 +98,10 @@
 </head>
 <body>
 <div class="wrap">
-    <h1 id="title">Mapped reads</h1>
-    <div class="meta" id="meta"></div>
+    <div class="title-line">
+        <h1 id="title">Mapped reads</h1>
+        <div class="meta" id="meta"></div>
+    </div>
     <div id="status">Loading reads…</div>
 
     <div id="viewer" hidden>
@@ -103,18 +109,27 @@
             <div class="group">
                 <button id="zoom-out" title="Zoom out">−</button>
                 <button id="zoom-in" title="Zoom in">+</button>
-                <button id="zoom-reset" title="Show whole contig">Whole contig</button>
+                <button id="zoom-reset" title="Show whole contig">All</button>
             </div>
+            <form class="group" id="goto-form">
+                <input id="goto" type="text" placeholder="1.2M-1.25M" size="11" aria-label="Go to position or region" title="Go to a position or region, e.g. 1,200,000 or 1.2M-1.25M">
+                <button type="submit">Go</button>
+            </form>
             <div class="group">
-                <label for="row-height">Row height</label>
+                <button id="prev-var" title="Previous variant">◀ var</button>
+                <button id="next-var" title="Next variant">var ▶</button>
+            </div>
+            <div class="sep"></div>
+            <div class="group" title="Row height">
+                <label for="row-height">Row</label>
                 <select id="row-height">
                     <option value="1">1 px</option>
                     <option value="5" selected>5 px</option>
                     <option value="10">10 px</option>
                 </select>
             </div>
-            <div class="group" title="Reads that don't fit are hidden from the pile only; depth and consensus still use all loaded reads">
-                <label for="max-rows">Max depth</label>
+            <div class="group" title="Max depth of the pile. Reads that don't fit are hidden from the pile only; depth and consensus still use all loaded reads">
+                <label for="max-rows">Depth</label>
                 <select id="max-rows">
                     <option value="100">100</option>
                     <option value="250" selected>250</option>
@@ -122,30 +137,19 @@
                     <option value="1000">1000</option>
                     <option value="0">all</option>
                 </select>
-                <span id="downsample-note"></span>
+                <span id="downsample-note" class="note"></span>
             </div>
-            <div class="group">
-                <label for="group-by">Group by</label>
+            <div class="group" title="Group reads by strand, or by their base at a position (click the coverage to pick it)">
+                <label for="group-by">Group</label>
                 <select id="group-by">
                     <option value="none" selected>none</option>
                     <option value="strand">strand</option>
-                    <option value="base">base at position</option>
+                    <option value="base">base</option>
                 </select>
-                <span id="group-note"></span>
-            </div>
-            <span id="region"></span>
-        </div>
-        <div class="toolbar">
-            <form class="group" id="goto-form">
-                <input id="goto" type="text" placeholder="1,200,000 or 1.2M-1.25M" size="22" aria-label="Go to position or region">
-                <button type="submit">Go</button>
-            </form>
-            <div class="group">
-                <button id="prev-var" title="Previous variant (from the variant table)">◀ variant</button>
-                <button id="next-var" title="Next variant (from the variant table)">variant ▶</button>
+                <span id="group-note" class="note"></span>
             </div>
             <div class="group" title="Reads below this MAPQ are hidden and left out of depth, consensus and variants">
-                <label for="min-mapq">Min MAPQ</label>
+                <label for="min-mapq">MAPQ ≥</label>
                 <select id="min-mapq">
                     <option value="0" selected>0</option>
                     <option value="1">1</option>
@@ -155,15 +159,15 @@
                     <option value="60">60</option>
                 </select>
             </div>
-            <div class="group">
-                <label for="color-by">Colour by</label>
+            <div class="group" title="Colour reads by strand or by MAPQ">
+                <label for="color-by">Colour</label>
                 <select id="color-by">
                     <option value="strand" selected>strand</option>
                     <option value="mapq">MAPQ</option>
                 </select>
             </div>
-            <label class="group"><input type="checkbox" id="show-clips" checked> soft clips</label>
-            <button id="dl-consensus" title="Consensus of the loaded reads as FASTA">Consensus FASTA</button>
+            <label class="group" title="Show soft-clipped read ends"><input type="checkbox" id="show-clips" checked> clips</label>
+            <button id="dl-consensus" title="Consensus of the loaded reads as FASTA">Consensus</button>
         </div>
         <div class="legend">
             <span><i class="sw" style="background:var(--fwd)"></i>forward</span>
@@ -367,10 +371,9 @@
             if (showHeaders) y += 4;
         }
         readsHeight = Math.max(20, y + 2);
-        $('downsample-note').textContent = hiddenReads ? `${hiddenReads.toLocaleString()} not drawn` : '';
+        $('downsample-note').textContent = hiddenReads ? `(${hiddenReads.toLocaleString()} hidden)` : '';
         $('group-note').textContent = groupBy === 'base'
-            ? (groupPos === null ? 'click the coverage to pick a position'
-                                 : `at ${(groupPos + 1).toLocaleString()} (click the coverage to change)`)
+            ? (groupPos === null ? 'click coverage' : `@ ${(groupPos + 1).toLocaleString()}`)
             : '';
     }
 
@@ -733,7 +736,6 @@
         counts = data.ref && span <= DETAIL_SPAN ? computeCounts(view.start, view.end) : null;
         drawTopTracks();
         drawReads();
-        $('region').textContent = `${fmtBp(view.start)} – ${fmtBp(view.end)}  (${fmtBp(span)} shown)`;
     }
 
     // ---- variants + consensus (whole contig, from the loaded reads that pass the MAPQ filter) ----
