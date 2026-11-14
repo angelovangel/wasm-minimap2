@@ -261,3 +261,93 @@ h1 {
     background-color: #e8590c;
     cursor: help;
 }
+
+/* Instant tooltip for contig names and warnings */
+.quick-tip {
+    position: fixed;
+    z-index: 1000;
+    display: none;
+    pointer-events: none;
+    max-width: 360px;
+    padding: 4px 8px;
+    font-size: 12px;
+    line-height: 1.4;
+    white-space: pre-line;
+    color: #fff;
+    background-color: rgba(0, 0, 0, 0.8);
+    border-radius: 3px;
+}
+
+/* Combined summary across samples */
+.combined-summary {
+    background-color: #fff;
+    border: 1px solid #e9ecef;
+    margin-bottom: 16px;
+}
+.combined-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 15px;
+    border-bottom: 1px solid #e9ecef;
+}
+.combined-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.95rem;
+    font-variant-numeric: tabular-nums;
+}
+.combined-table th, .combined-table td {
+    padding: 6px 15px;
+    text-align: right;
+    border-bottom: 1px solid #f1f3f5;
+    white-space: nowrap;
+}
+.combined-table th {
+    background-color: #e9ecef;
+    color: #6c757d;
+    font-size: 0.85rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.combined-table tbody tr { cursor: pointer; }
+.combined-table tbody tr:hover { background-color: #f1f6ff; }
+.combined-table tbody tr.active { background-color: #e7f0ff; }
+
+/* Sample tabs (flat) */
+.sample-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0;
+    list-style: none;
+    padding: 0;
+    margin: 0 0 16px;
+    border-bottom: 1px solid #dee2e6;
+}
+.sample-tabs button {
+    border: none;
+    border-bottom: 2px solid transparent;
+    background: none;
+    padding: 8px 14px;
+    color: #6c757d;
+    font-weight: 500;
+}
+.sample-tabs button:hover { color: #343a40; }
+.sample-tabs button.active {
+    color: #0b5ed7;
+    border-bottom-color: #0b5ed7;
+}
+.warn-dot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-right: 6px;
+    vertical-align: middle;
+    background-color: #e8590c;
+}
+
+/* Per-sample download buttons */
+.sample-downloads {
+    margin: -4px 0 16px;
+}

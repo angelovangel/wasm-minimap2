@@ -11,14 +11,15 @@ const CLI = await new Aioli([
 
 const NBINS = 300; // number of windows in each contig's depth profile
 const DEPTH_MAX_BP = 25e6; // up to this total reference size, profiles come from one samtools depth pass
+const MMI_MAX_REF_BYTES = 50e6; // prebuild a reusable minimap2 index (.mmi) for several samples up to this reference size
 const SPARKLINE_COLOR = '#4c9aff';
 const MIN_LINE_COLOR = '#c2255c'; // lowest depth per bin
 
 // **NEW GLOBAL VARIABLE** to store max length for proportional scaling
 let maxContigLength = 1; // Initialize to 1 to avoid division by zero
 
-// Per-contig results of the last run (stats + binned depth), used by the reads view
-let contigResults = [];
+// One entry per sample (= one input fastq): { name, bam, contigs, summary, bamUrl }
+let samples = [];
 let referenceFile = null; // the reference fasta File, read again by the reads view
 const contigSeqCache = new Map();
 
@@ -67,8 +68,8 @@ function buildAxisHtml(length, widthPct) {
 }
 
 // Sparkline + contig line, both scaled to contig length relative to the longest contig
-function renderSparklines() {
-    $('#depthList .profile-track').each(function() {
+function renderSparklines(root) {
+    $(root).find('.profile-track').each(function() {
         const $track = $(this);
         const $spark = $track.find('.sparkline-container');
         const depths = $spark.data('depths');
@@ -129,8 +130,8 @@ function renderSparklines() {
 // Depth profiles from one `samtools depth` pass (fast; true per-base minimum per bin).
 // Without -a only covered positions are printed, so bins with missing positions have min 0.
 // Deletions are not counted as coverage (samtools depth default), so they show as dips.
-async function depthProfilesFromDepth(contigStats) {
-    const out = await CLI.exec("samtools depth -d 0 output.sorted.bam");
+async function depthProfilesFromDepth(contigStats, bam) {
+    const out = await CLI.exec("samtools", ["depth", "-d", "0", bam]);
     const byName = Object.fromEntries(contigStats.map(c => [c.name, {
         c, sum: new Float64Array(Math.ceil(c.length / c.binSize)),
         n: new Int32Array(Math.ceil(c.length / c.binSize)),
@@ -174,7 +175,7 @@ async function depthProfilesFromDepth(contigStats) {
 
 // Depth profiles for large references: samtools bedcov over NBINS windows per contig
 // (mean only; per-base output would be too large). -j: don't count deletions as coverage.
-async function depthProfilesFromBedcov(contigStats) {
+async function depthProfilesFromBedcov(contigStats, bam) {
     const bed = [];
     for (const c of contigStats) {
         for (let st = 0; st < c.length; st += c.binSize) {
@@ -182,11 +183,11 @@ async function depthProfilesFromBedcov(contigStats) {
         }
     }
     await CLI.fs.writeFile("windows.bed", bed.join('\n') + '\n');
-    let out = await CLI.exec("samtools bedcov -j windows.bed output.sorted.bam");
+    let out = await CLI.exec("samtools", ["bedcov", "-j", "windows.bed", bam]);
     if (!/^\S+\t\d+\t\d+\t\d+/.test(out)) {
         // older samtools without -j: fall back to counting deletions as covered
         console.warn("samtools bedcov -j failed, retrying without -j:", out.slice(0, 200));
-        out = await CLI.exec("samtools bedcov windows.bed output.sorted.bam");
+        out = await CLI.exec("samtools", ["bedcov", "windows.bed", bam]);
     }
     await CLI.fs.unlink("windows.bed");
     const profiles = {};
@@ -236,19 +237,113 @@ function stopProgress() {
     progressTimer = null;
 }
 
+// Sample name from a fastq file name: strip .fastq/.fq(.gz)
+function sampleNameFromFile(fileName) {
+    return fileName.replace(/\.(fastq|fq)(\.gz)?$/i, '').replace(/\.gz$/i, '') || fileName;
+}
+
+// Align and analyse one sample. `progress(frac, label)` reports 0..1 within this sample.
+async function runSample({ name, fastq, target, preset, subsamplePct, index }, progress) {
+    const tag = `s${index}`;
+    const sam = `${tag}.sam`, bam = `${tag}.sorted.bam`;
+
+    // --- optional subsampling (seqtk sample, fixed seed for reproducibility) ---
+    // seqtk writes to stdout, so its output is written back into the in-memory filesystem
+    let reads = fastq, subsampledFile = null;
+    if (subsamplePct < 100) {
+        progress(0, `Subsampling ${subsamplePct}% of reads…`);
+        const fq = await CLI.exec("seqtk", ["sample", "-s", "11", fastq, String(subsamplePct / 100)]);
+        subsampledFile = `${tag}.subsample.fastq`;
+        await CLI.fs.writeFile(subsampledFile, fq);
+        reads = subsampledFile;
+    }
+
+    progress(0.05, "Aligning reads with minimap2 (longest step)…");
+    await CLI.exec("minimap2", [
+        "-a",
+        "-K", "50M", // smaller query batches -> lower peak memory (default 500M)
+        "-x", preset,
+        "-o", sam,
+        target,
+        reads
+    ]);
+    if (subsampledFile) await CLI.fs.unlink(subsampledFile);
+
+    // Sort SAM straight into BAM; -m caps the sort buffer so samtools spills to temp files
+    progress(0.6, "Sorting alignments…");
+    await CLI.exec("samtools", ["sort", "-m", "200M", "-o", bam, sam]);
+    await CLI.fs.unlink(sam); // free the SAM as soon as possible
+    progress(0.75, "Indexing BAM…");
+    await CLI.exec("samtools", ["index", bam]);
+
+    // --- read counts (flagstat) ---
+    progress(0.8, "Counting mapped reads…");
+    const flagstat = await CLI.exec("samtools", ["flagstat", bam]);
+    const grab = (re) => { const m = flagstat.match(re); return m ? parseInt(m[1], 10) : 0; };
+    const total = grab(/^(\d+)\s*\+\s*\d+\s*in total/m);
+    const secondary = grab(/^(\d+)\s*\+\s*\d+\s*secondary/m);
+    const supplementary = grab(/^(\d+)\s*\+\s*\d+\s*supplementary/m);
+    const mappedAll = grab(/^(\d+)\s*\+\s*\d+\s*mapped\s+\(/m);
+    // flagstat counts secondary/supplementary records as mapped; unmapped records are always primary
+    const reads_ = Math.max(0, total - secondary - supplementary);
+    const mapped = Math.max(0, mappedAll - secondary - supplementary);
+    const unmapped = Math.max(0, total - mappedAll);
+
+    const bamUrl = URL.createObjectURL(new Blob([await CLI.fs.readFile(bam)], { type: 'application/octet-stream' }));
+
+    // --- per-contig stats (samtools coverage) ---
+    // Columns: 0:#rname 1:startpos 2:endpos 3:numreads 4:covbases 5:coverage 6:meandepth 7:meanbaseq 8:meanmapq
+    progress(0.85, "Computing per-contig coverage…");
+    const covOutput = await CLI.exec("samtools", ["coverage", "-H", bam]);
+    const contigs = [];
+    const num = (x) => { const v = parseFloat(x); return isNaN(v) ? 0 : v; };
+    for (const line of covOutput.trim().split('\n')) {
+        const f = line.split('\t');
+        if (f.length < 9) continue;
+        contigs.push({
+            name: cleanContigName(f[0]),
+            length: num(f[2]),
+            numreads: num(f[3]),
+            coverage: num(f[5]).toFixed(0),
+            meandepth: num(f[6]).toFixed(0),
+            meanmapq: num(f[8]).toFixed(0),
+        });
+    }
+
+    // --- binned depth profiles: mean + lowest depth per bin, so narrow dips still show ---
+    progress(0.92, "Building depth profiles…");
+    for (const c of contigs) {
+        c.binSize = Math.max(1, Math.ceil(c.length / NBINS));
+        maxContigLength = Math.max(maxContigLength, c.length);
+    }
+    const totalRefBp = contigs.reduce((t, c) => t + c.length, 0);
+    const { profiles, minProfiles } = totalRefBp <= DEPTH_MAX_BP
+        ? await depthProfilesFromDepth(contigs, bam)
+        : await depthProfilesFromBedcov(contigs, bam);
+    for (const c of contigs) {
+        c.profile = profiles[c.name] || [];
+        c.minProfile = minProfiles[c.name] || [];
+        c.warnings = contigWarnings(c, minProfiles[c.name]);
+    }
+
+    return {
+        name, bam, bamUrl, contigs,
+        summary: {
+            reads: reads_, mapped, unmapped,
+            mappedPct: reads_ > 0 ? (mapped / reads_ * 100) : 0,
+            nWarn: contigs.filter(c => c.warnings.length).length
+        }
+    };
+}
+
 async function run() {
     const outputDiv = document.getElementById("output");
-    const ulList = document.getElementById('depthList');
-    const downloadButton = document.getElementById("download-bam");
+    const resultsDiv = document.getElementById("results");
 
-    // 1. Initial State Setup
     showProgress(outputDiv);
     document.getElementById("btn").disabled = true;
-    //downloadButton.style.display = 'none'; // Hide button at start of run
-    ulList.innerHTML = ''; 
-    document.getElementById("flagstat-summary").innerHTML = '';
-    
-    // Reset maxContigLength at the start of a run
+    resultsDiv.innerHTML = '';
+    samples = [];
     maxContigLength = 1;
 
     try {
@@ -256,8 +351,7 @@ async function run() {
         const r = document.getElementById("ref").files;
 
         if (q.length === 0 || r.length === 0) {
-            outputDiv.innerHTML = '<div class="alert alert-danger" role="alert">Please select both a **Reference** and **Query** file(s).</div>';
-            document.getElementById("btn").disabled = false;
+            outputDiv.innerHTML = '<div class="alert alert-danger" role="alert">Please select both a <b>Reference</b> and <b>Query</b> file(s).</div>';
             return;
         }
 
@@ -266,193 +360,49 @@ async function run() {
             outputDiv.innerHTML = '<div class="alert alert-danger" role="alert">Proportion of reads must be between 0 and 100%.</div>';
             return;
         }
-
         const preset = document.getElementById("preset").value;
 
-        setProgress(5, "Loading files…");
-        let query = await CLI.mount(q);
-        const ref = await CLI.mount(r);
+        setProgress(2, "Loading files…");
+        const queryPaths = await CLI.mount(q);
+        const refPath = (await CLI.mount(r))[0];
         referenceFile = r[0];
         contigSeqCache.clear();
 
-        // --- OPTIONAL SUBSAMPLING (seqtk sample, fixed seed for reproducibility) ---
-        // seqtk writes to stdout, so its output is written back into the
-        // in-memory filesystem as a plain fastq that minimap2 can read.
-        const subsampled = [];
-        if (subsamplePct < 100) {
-            const frac = String(subsamplePct / 100);
-            for (let i = 0; i < query.length; i++) {
-                setProgress(5, `Subsampling ${subsamplePct}% of reads (file ${i + 1}/${query.length})…`);
-                const fq = await CLI.exec("seqtk", ["sample", "-s", "11", query[i], frac]);
-                const name = `subsample_${i}.fastq`;
-                await CLI.fs.writeFile(name, fq);
-                subsampled.push(name);
-            }
-            query = subsampled;
+        // One sample per fastq file; make names unique
+        const seen = new Map();
+        const jobs = [...q].map((file, i) => {
+            let name = sampleNameFromFile(file.name);
+            const k = (seen.get(name) || 0) + 1;
+            seen.set(name, k);
+            if (k > 1) name = `${name}_${k}`;
+            return { name, fastq: queryPaths[i], index: i };
+        });
+
+        // With several samples, build the minimap2 index once and reuse it
+        // (skipped for big references, where the .mmi copy would cost too much memory)
+        let target = refPath;
+        if (jobs.length > 1 && r[0].size <= MMI_MAX_REF_BYTES) {
+            setProgress(4, "Indexing reference…");
+            await CLI.exec("minimap2", ["-x", preset, "-d", "ref.mmi", refPath]);
+            target = "ref.mmi";
         }
 
-        // --- PIPELINE EXECUTION ---
-        setProgress(10, "Aligning reads with minimap2 (longest step)…");
-        const mmap_out = await CLI.exec("minimap2", [
-            "-a",
-            "-K", "50M", // smaller query batches -> lower peak memory (default 500M)
-            "-o", "output.sam",
-            "-x", preset,
-            ref[0],
-            ...query
-        ]);
-        // Subsampled fastqs are no longer needed once aligned
-        for (const f of subsampled) await CLI.fs.unlink(f);
-
-        // Sort SAM directly into BAM (skips the intermediate unsorted BAM).
-        // -m caps the per-thread sort buffer so samtools spills to temp files.
-        setProgress(65, "Sorting alignments…");
-        await CLI.exec("samtools sort -m 200M -o output.sorted.bam output.sam");
-        // Free the SAM from the in-memory filesystem as soon as it's no longer needed
-        await CLI.fs.unlink("output.sam");
-        setProgress(80, "Indexing BAM…");
-        await CLI.exec("samtools index output.sorted.bam");
-
-        // Run samtools flagstat
-        setProgress(85, "Counting mapped reads…");
-        const flagstatOutput = await CLI.exec("samtools flagstat output.sorted.bam");
-        
-        // BAM download bug fix
-        // 1. Read the file content from the Aioli filesystem as a Uint8Array
-        const bamData = await CLI.fs.readFile("output.sorted.bam");
-        // 2. Create a Blob object from the data
-        const bamBlob = new Blob([bamData], { type: 'application/octet-stream' }); 
-        // 3. Create a stable, revocable URL for the Blob
-        // This URL remains valid as long as the Blob object exists
-        const download_url = URL.createObjectURL(bamBlob);
-        
-        downloadButton.href = download_url;
-        downloadButton.style.display = 'inline-block'; 
-
-        
-        //Reads stats 
-        const totalReadsMatch = flagstatOutput.match(/^(\d+)\s*\+\s*\d+\s*in total/m);
-        const secondaryReadsMatch = flagstatOutput.match(/^(\d+)\s*\+\s*\d+\s*secondary/m);
-        const supplementaryReadsMatch = flagstatOutput.match(/^(\d+)\s*\+\s*\d+\s*supplementary/m);
-        const mappedReadsMatch = flagstatOutput.match(/^(\d+)\s*\+\s*\d+\s*mapped\s+\((\d+\.\d+)%/m);
-        
-        let primaryReads = 'N/A';
-        let primaryMapped = 'N/A';
-        let primaryMappedPercent = 'N/A';
-
-        // Get the required raw counts (QC-passed)
-        const total = totalReadsMatch ? parseInt(totalReadsMatch[1], 10) : 0;
-        const secondary = secondaryReadsMatch ? parseInt(secondaryReadsMatch[1], 10) : 0;
-        const supplementary = supplementaryReadsMatch ? parseInt(supplementaryReadsMatch[1], 10) : 0;
-        
-        const mappedTotal = mappedReadsMatch ? parseInt(mappedReadsMatch[1], 10) : 0;
-        
-        let calculatedPrimaryReads = total - secondary - supplementary;
-        
-        if (calculatedPrimaryReads > 0) {
-            primaryReads = calculatedPrimaryReads.toLocaleString();
-            
-            const mappedRatio = total > 0 ? (mappedTotal / total) : 0;
-            const calculatedPrimaryMapped = Math.round(calculatedPrimaryReads * mappedRatio);
-            
-            primaryMapped = calculatedPrimaryMapped.toLocaleString();
-            
-            // 3. Calculate Primary Mapped Percentage
-            const calculatedPrimaryMappedPercent = calculatedPrimaryReads > 0 
-                ? ((calculatedPrimaryMapped / calculatedPrimaryReads) * 100).toFixed(2)
-                : '0.00';
-                
-            primaryMappedPercent = calculatedPrimaryMappedPercent;
-        }
-
-        // Unmapped records are always primary, so total - mapped is exact
-        const unmapped = Math.max(0, total - mappedTotal);
-        const summaryHtml = `
-            <div class="alert alert-info summary-box" role="alert">
-                <span class="fw-bold">${subsamplePct < 100 ? `Reads used (${subsamplePct}% subsample)` : "Total fastq reads"}:</span> ${primaryReads} &nbsp;|&nbsp; 
-                <span class="fw-bold">Mapped reads:</span> ${primaryMapped} 
-                (${primaryMappedPercent}%) &nbsp;|&nbsp;
-                <span class="fw-bold">Unmapped:</span> ${unmapped.toLocaleString()}
-                <span id="warn-summary"></span>
-            </div>
-        `;
-        document.getElementById("flagstat-summary").innerHTML = summaryHtml;
-        const unmappedBtn = document.getElementById("download-unmapped");
-        unmappedBtn.style.display = unmapped > 0 ? 'inline-block' : 'none';
-        
-        // --- PER-CONTIG STATS (samtools coverage) ---
-        // Columns: 0:#rname 1:startpos 2:endpos 3:numreads 4:covbases 5:coverage 6:meandepth 7:meanbaseq 8:meanmapq
-        setProgress(90, "Computing per-contig coverage…");
-        const covOutput = await CLI.exec("samtools coverage -H output.sorted.bam");
-        const contigStats = [];
-        for (const line of covOutput.trim().split('\n')) {
-            const f = line.split('\t');
-            if (f.length < 9) continue;
-            const num = (x) => { const v = parseFloat(x); return isNaN(v) ? 0 : v; };
-            contigStats.push({
-                name: cleanContigName(f[0]),
-                length: num(f[2]),
-                numreads: num(f[3]),
-                coverage: num(f[5]).toFixed(0),
-                meandepth: num(f[6]).toFixed(0),
-                meanmapq: num(f[8]).toFixed(0),
+        const n = jobs.length;
+        for (const job of jobs) {
+            const sample = await runSample({ ...job, target, preset, subsamplePct }, (frac, label) => {
+                const pct = 5 + 95 * (job.index + frac) / n;
+                setProgress(pct, n > 1 ? `Sample ${job.index + 1}/${n} (${job.name}): ${label}` : label);
             });
+            samples.push(sample);
         }
+        if (target === "ref.mmi") await CLI.fs.unlink("ref.mmi");
 
-        if (contigStats.length === 0) {
+        if (samples.every(sm => sm.contigs.length === 0)) {
             outputDiv.innerHTML = '<div class="alert alert-warning" role="alert">Analysis completed, but no coverage data was generated. Check your input files.</div>';
-            downloadButton.style.display = 'none';
             return;
         }
 
-        // --- BINNED DEPTH PROFILE ---
-        // Per contig, <= NBINS bins with the mean depth and the lowest depth in each bin,
-        // so a dip narrower than a bin (e.g. a deletion) still shows up.
-        setProgress(95, "Building depth profiles…");
-        for (const c of contigStats) {
-            c.binSize = Math.max(1, Math.ceil(c.length / NBINS));
-            maxContigLength = Math.max(maxContigLength, c.length);
-        }
-        const totalRefBp = contigStats.reduce((t, c) => t + c.length, 0);
-        const { profiles, minProfiles } = totalRefBp <= DEPTH_MAX_BP
-            ? await depthProfilesFromDepth(contigStats)
-            : await depthProfilesFromBedcov(contigStats);
-
-        // --- CONTIG WARNINGS ---
-        for (const c of contigStats) {
-            c.warnings = contigWarnings(c, minProfiles[c.name]);
-        }
-        const nWarn = contigStats.filter(c => c.warnings.length).length;
-        document.getElementById("warn-summary").innerHTML = nWarn
-            ? `&nbsp;|&nbsp; <span class="warn-badge">!</span>${nWarn} of ${contigStats.length} contigs with warnings (hover the ! for details)`
-            : '';
-
-        // --- LIST POPULATION ---
-        const listItemsHtml = [];
-        contigResults = contigStats.map(c => ({ ...c, profile: profiles[c.name] || [] }));
-        document.getElementById("download-csv").style.display = 'inline-block';
-
-        for (const [i, c] of contigStats.entries()) {
-            const depthsJSON = JSON.stringify(profiles[c.name] || []);
-            const minsJSON = JSON.stringify(minProfiles[c.name] || []);
-            const sparklineHtml = `<div class="profile-track" data-length='${c.length}' data-bin='${c.binSize}'><span class="sparkline-container" data-depths='${depthsJSON}' data-mins='${minsJSON}'></span></div>`;
-
-            listItemsHtml.push(`
-                <li class="depth-item clickable" data-index="${i}" title="Click to view reads for ${c.name}">
-                    <div class="contig-name">${c.warnings.length ? `<span class="warn-badge" title="${c.warnings.join('\n')}">!</span>` : ''}${c.name}</div>
-                    <div class="mean-depth">${c.meandepth}</div>
-                    
-                    <div class="coverage">${c.coverage}%</div>
-                    <div class="mean-mapq">${c.meanmapq}</div>
-                    <div class="depth-profile">${sparklineHtml}</div>
-                </li>
-            `);
-        }
-        
-        ulList.innerHTML = listItemsHtml.join('');
-
-        // --- SPARKLINE RENDERING ---
-        renderSparklines(); 
+        renderResults(subsamplePct);
         outputDiv.innerHTML = ''; // done: remove progress bar
         // Results are shown: hide the inputs and Run button (RESET starts over)
         document.getElementById("inputs").style.display = 'none';
@@ -460,14 +410,122 @@ async function run() {
 
     } catch (error) {
         console.error(error);
-        // On error, display error message and hide the download button
-        downloadButton.style.display = 'none';
-        outputDiv.innerHTML = `<div class="alert alert-danger" role="alert">An error occurred during execution: **${error.message || String(error) || 'Unknown Aioli/CLI Error'}**</div>`;
+        outputDiv.innerHTML = `<div class="alert alert-danger" role="alert">An error occurred during execution: <b>${escAttr(error.message || String(error) || 'Unknown Aioli/CLI Error')}</b></div>`;
     } finally {
         stopProgress();
         document.getElementById("btn").disabled = false;
     }
 }
+
+// --- RESULTS: combined summary + one tab per sample ---
+function renderResults(subsamplePct) {
+    const resultsDiv = document.getElementById("results");
+    const multi = samples.length > 1;
+    const readsLabel = subsamplePct < 100 ? `Reads used (${subsamplePct}% subsample)` : 'Reads';
+
+    let html = '';
+    if (multi) {
+        const rows = samples.map((sm, si) => {
+            const s = sm.summary;
+            return `<tr data-sample="${si}">
+                <td class="text-start">${escAttr(sm.name)}</td>
+                <td>${s.reads.toLocaleString()}</td>
+                <td>${s.mapped.toLocaleString()}</td>
+                <td>${s.mappedPct.toFixed(1)}%</td>
+                <td>${s.unmapped.toLocaleString()}</td>
+                <td>${s.nWarn ? `<span class="warn-badge">!</span>${s.nWarn}` : '–'}</td>
+            </tr>`;
+        }).join('');
+        html += `
+            <div class="combined-summary">
+                <div class="combined-head">
+                    <span class="fw-bold">${samples.length} samples</span>
+                    <button class="btn btn-outline-secondary btn-sm" id="download-all-csv">All stats CSV</button>
+                </div>
+                <table class="combined-table">
+                    <thead><tr><th class="text-start">Sample</th><th>${readsLabel}</th><th>Mapped</th><th>Mapped %</th><th>Unmapped</th><th>Contigs with warnings</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+            <ul class="sample-tabs" role="tablist">
+                ${samples.map((sm, si) => `<li><button role="tab" data-sample="${si}" class="${si === 0 ? 'active' : ''}">${sm.summary.nWarn ? '<span class="warn-dot"></span>' : ''}${escAttr(sm.name)}</button></li>`).join('')}
+            </ul>`;
+    }
+    html += samples.map((sm, si) => samplePanelHtml(sm, si, readsLabel, si === 0)).join('');
+    resultsDiv.innerHTML = html;
+
+    showSample(0);
+    if (multi) document.getElementById("download-all-csv").addEventListener("click", () => downloadStatsCsv(null));
+}
+
+function samplePanelHtml(sm, si, readsLabel, visible) {
+    const s = sm.summary;
+    const items = sm.contigs.map((c, i) => {
+        const sparklineHtml = `<div class="profile-track" data-length='${c.length}' data-bin='${c.binSize}'><span class="sparkline-container" data-depths='${JSON.stringify(c.profile)}' data-mins='${JSON.stringify(c.minProfile)}'></span></div>`;
+        return `
+            <li class="depth-item clickable" data-sample="${si}" data-index="${i}">
+                <div class="contig-name" data-tip="${escAttr(`${c.name}\nclick to view reads`)}">${c.warnings.length ? `<span class="warn-badge" data-tip="${escAttr(c.warnings.join('\n'))}">!</span>` : ''}${escAttr(c.name)}</div>
+                <div class="mean-depth">${c.meandepth}</div>
+                <div class="coverage">${c.coverage}%</div>
+                <div class="mean-mapq">${c.meanmapq}</div>
+                <div class="depth-profile">${sparklineHtml}</div>
+            </li>`;
+    }).join('');
+    const safe = sm.name.replace(/[^\w.-]+/g, '_');
+    return `
+        <div class="sample-panel" data-sample="${si}" ${visible ? '' : 'hidden'}>
+            <div class="alert alert-info summary-box" role="alert">
+                <span class="fw-bold">Sample:</span> ${escAttr(sm.name)} &nbsp;|&nbsp;
+                <span class="fw-bold">${readsLabel}:</span> ${s.reads.toLocaleString()} &nbsp;|&nbsp;
+                <span class="fw-bold">Mapped reads:</span> ${s.mapped.toLocaleString()} (${s.mappedPct.toFixed(2)}%) &nbsp;|&nbsp;
+                <span class="fw-bold">Unmapped:</span> ${s.unmapped.toLocaleString()}
+                ${s.nWarn ? `&nbsp;|&nbsp; <span class="warn-badge">!</span>${s.nWarn} of ${sm.contigs.length} contigs with warnings (hover the ! for details)` : ''}
+            </div>
+            <div class="sample-downloads">
+                <a class="btn btn-success me-2" href="${sm.bamUrl}" download="${safe}.sorted.bam">Download BAM</a>
+                <button class="btn btn-outline-secondary me-2" data-action="csv" data-sample="${si}">Stats CSV</button>
+                ${s.unmapped > 0 ? `<button class="btn btn-outline-secondary" data-action="unmapped" data-sample="${si}">Unmapped FASTQ</button>` : ''}
+            </div>
+            <div class="depth-list-headers depth-item">
+                <div class="contig-name">Contig</div>
+                <div class="mean-depth">Depth</div>
+                <div class="coverage">Cov (%)</div>
+                <div class="mean-mapq">MAPQ</div>
+                <div class="depth-profile">Depth Profile</div>
+            </div>
+            <ul class="depth-list">${items}</ul>
+        </div>`;
+}
+
+// Show one sample's panel; sparklines are drawn the first time a panel is visible
+// (jquery.sparkline can't measure widths inside hidden elements)
+function showSample(si) {
+    document.querySelectorAll('#results .sample-panel').forEach(p => {
+        const on = parseInt(p.dataset.sample, 10) === si;
+        p.hidden = !on;
+        if (on && !p.dataset.rendered) { renderSparklines(p); p.dataset.rendered = '1'; }
+    });
+    document.querySelectorAll('#results .sample-tabs button').forEach(b => {
+        b.classList.toggle('active', parseInt(b.dataset.sample, 10) === si);
+    });
+    document.querySelectorAll('#results .combined-table tbody tr').forEach(tr => {
+        tr.classList.toggle('active', parseInt(tr.dataset.sample, 10) === si);
+    });
+}
+
+// --- INSTANT TOOLTIPS for the results table (native title tooltips appear only after ~1 s) ---
+const escAttr = (v) => String(v).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+const tipEl = Object.assign(document.createElement('div'), { className: 'quick-tip' });
+document.body.appendChild(tipEl);
+document.getElementById("results").addEventListener("mousemove", (e) => {
+    const el = e.target.closest('[data-tip]');
+    if (!el) { tipEl.style.display = 'none'; return; }
+    tipEl.textContent = el.dataset.tip;
+    tipEl.style.display = 'block';
+    tipEl.style.left = `${Math.min(e.clientX + 12, window.innerWidth - tipEl.offsetWidth - 8)}px`;
+    tipEl.style.top = `${e.clientY + 14}px`;
+});
+document.getElementById("results").addEventListener("mouseleave", () => { tipEl.style.display = 'none'; });
 
 // --- CONTIG WARNINGS ---
 const WARN_MIN_COVERAGE = 90; // % of bases covered
@@ -503,28 +561,33 @@ function downloadBlob(blob, filename) {
 
 const csvCell = (v) => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v);
 
-function downloadStatsCsv() {
-    const header = ['contig', 'length', 'reads', 'covered_pct', 'mean_depth', 'mean_mapq', 'warnings'];
+// Stats CSV for one sample (index) or all samples (null), with a sample column
+function downloadStatsCsv(si) {
+    const list = si === null ? samples : [samples[si]];
+    const header = ['sample', 'contig', 'length', 'reads', 'covered_pct', 'mean_depth', 'mean_mapq', 'warnings'];
     const lines = [header.join(',')];
-    for (const c of contigResults) {
-        lines.push([c.name, c.length, c.numreads, c.coverage, c.meandepth, c.meanmapq, (c.warnings || []).join('; ')]
-            .map(csvCell).join(','));
+    for (const sm of list) {
+        for (const c of sm.contigs) {
+            lines.push([sm.name, c.name, c.length, c.numreads, c.coverage, c.meandepth, c.meanmapq, (c.warnings || []).join('; ')]
+                .map(csvCell).join(','));
+        }
     }
-    downloadBlob(new Blob([lines.join('\n') + '\n'], { type: 'text/csv' }), 'contig_stats.csv');
+    const fname = si === null ? 'contig_stats_all_samples.csv' : `${list[0].name.replace(/[^\w.-]+/g, '_')}_contig_stats.csv`;
+    downloadBlob(new Blob([lines.join('\n') + '\n'], { type: 'text/csv' }), fname);
 }
 
 // Unmapped reads as FASTQ. samtools fastq writes reads to a file (-0) so its
 // stderr messages can't end up mixed into the FASTQ.
-async function downloadUnmapped() {
-    const btn = document.getElementById("download-unmapped");
+async function downloadUnmapped(si, btn) {
+    const sm = samples[si];
     const label = btn.textContent;
     btn.disabled = true;
     btn.textContent = 'Extracting…';
     try {
-        await CLI.exec("samtools", ["fastq", "-f", "4", "-0", "unmapped.fastq", "output.sorted.bam"]);
+        await CLI.exec("samtools", ["fastq", "-f", "4", "-0", "unmapped.fastq", sm.bam]);
         const data = await CLI.fs.readFile("unmapped.fastq");
         await CLI.fs.unlink("unmapped.fastq");
-        downloadBlob(new Blob([data], { type: 'text/plain' }), 'unmapped.fastq');
+        downloadBlob(new Blob([data], { type: 'text/plain' }), `${sm.name.replace(/[^\w.-]+/g, '_')}_unmapped.fastq`);
     } catch (err) {
         console.error(err);
         alert(`Could not extract unmapped reads: ${err.message || err}`);
@@ -534,8 +597,24 @@ async function downloadUnmapped() {
     }
 }
 
-document.getElementById("download-csv").addEventListener("click", downloadStatsCsv);
-document.getElementById("download-unmapped").addEventListener("click", downloadUnmapped);
+// Clicks in the results: tabs, combined-summary rows, downloads, contig rows (reads view)
+document.getElementById("results").addEventListener("click", (e) => {
+    const tab = e.target.closest('.sample-tabs button, .combined-table tbody tr');
+    if (tab) { showSample(parseInt(tab.dataset.sample, 10)); return; }
+    const action = e.target.closest('[data-action]');
+    if (action) {
+        const si = parseInt(action.dataset.sample, 10);
+        if (action.dataset.action === 'csv') downloadStatsCsv(si);
+        if (action.dataset.action === 'unmapped') downloadUnmapped(si, action);
+        return;
+    }
+    const item = e.target.closest('.depth-item[data-index]');
+    if (item) {
+        const sm = samples[parseInt(item.dataset.sample, 10)];
+        const contig = sm?.contigs[parseInt(item.dataset.index, 10)];
+        if (contig) openReadsView(sm, contig);
+    }
+});
 
 // --- READS VIEW (opens reads.html in a new tab) ---
 const MAX_VIEW_READS = 3000; // above this, reads are randomly subsampled for display
@@ -629,8 +708,8 @@ function parseSamRead(line, ref) {
     };
 }
 
-async function fetchContigReads(contig) {
-    const countOut = await CLI.exec("samtools", ["view", "-c", "-F", EXCLUDE_FLAGS, "output.sorted.bam", contig.name]);
+async function fetchContigReads(contig, bam) {
+    const countOut = await CLI.exec("samtools", ["view", "-c", "-F", EXCLUDE_FLAGS, bam, contig.name]);
     const total = parseInt(countOut.trim().split('\n').pop(), 10) || 0;
 
     const args = ["view", "-F", EXCLUDE_FLAGS];
@@ -640,7 +719,7 @@ async function fetchContigReads(contig) {
         // samtools -s INT.FRAC: integer part is the seed, fractional part the fraction kept
         args.push("-s", `42${fraction.toFixed(6).slice(1)}`);
     }
-    args.push("output.sorted.bam", contig.name);
+    args.push(bam, contig.name);
     const sam = await CLI.exec("samtools", args);
 
     // Reference bases for mismatch calling (skipped for very long contigs)
@@ -674,28 +753,30 @@ window.addEventListener('message', (e) => {
     const v = readsViews.get(e.source);
     if (v) { v.ready = true; deliverReads(e.source); return; }
     // Unknown tab (e.g. the reads tab was reloaded): fetch again for the contig it names
-    const contig = contigResults.find(c => c.name === e.data.contig);
-    if (contig) sendReadsTo(e.source, contig, true);
+    const sm = samples.find(x => x.name === e.data.sample) || (samples.length === 1 ? samples[0] : null);
+    const contig = sm?.contigs.find(c => c.name === e.data.contig);
+    if (contig) sendReadsTo(e.source, sm, contig, true);
 });
 
-async function openReadsView(contig) {
+async function openReadsView(sm, contig) {
     // Open the tab synchronously in the click handler so popup blockers allow it
-    const win = window.open(`reads.html#${encodeURIComponent(contig.name)}`, '_blank');
+    const hash = new URLSearchParams({ contig: contig.name, sample: sm.name }).toString();
+    const win = window.open(`reads.html#${hash}`, '_blank');
     if (!win) {
         alert('Please allow pop-ups for this page to open the reads view.');
         return;
     }
-    sendReadsTo(win, contig, false);
+    sendReadsTo(win, sm, contig, false);
 }
 
-async function sendReadsTo(win, contig, ready) {
+async function sendReadsTo(win, sm, contig, ready) {
     readsViews.set(win, { ready, payload: null });
     let payload;
     try {
-        const { total, fraction, reads, ref } = await fetchContigReads(contig);
+        const { total, fraction, reads, ref } = await fetchContigReads(contig, sm.bam);
         payload = {
             contig: { name: contig.name, length: contig.length, meandepth: contig.meandepth, coverage: contig.coverage, binSize: contig.binSize },
-            profile: contig.profile, total, fraction, reads, ref, limit: MAX_VIEW_READS
+            sample: sm.name, profile: contig.profile, total, fraction, reads, ref, limit: MAX_VIEW_READS
         };
     } catch (err) {
         console.error(err);
@@ -704,13 +785,6 @@ async function sendReadsTo(win, contig, ready) {
     const v = readsViews.get(win);
     if (v) { v.payload = payload; deliverReads(win); }
 }
-
-document.getElementById("depthList").addEventListener("click", (e) => {
-    const item = e.target.closest('.depth-item[data-index]');
-    if (!item) return;
-    const contig = contigResults[parseInt(item.dataset.index, 10)];
-    if (contig) openReadsView(contig);
-});
 
 // Attach event listeners
 document.getElementById("btn").addEventListener("click", run);

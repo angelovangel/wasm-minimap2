@@ -242,8 +242,14 @@
     const covCanvas = $('cov-canvas'), readsCanvas = $('reads-canvas');
     const tooltip = $('tooltip');
 
-    const contigName = decodeURIComponent(location.hash.slice(1));
-    if (contigName) { $('title').textContent = contigName; document.title = `${contigName} · reads`; }
+    // Hash: #contig=<name>&sample=<name> (older links: #<contig>)
+    const hashParams = new URLSearchParams(location.hash.slice(1));
+    const contigName = hashParams.get('contig') ?? decodeURIComponent(location.hash.slice(1));
+    const sampleName = hashParams.get('sample') || '';
+    if (contigName) {
+        $('title').textContent = contigName;
+        document.title = `${sampleName ? sampleName + ' · ' : ''}${contigName} · reads`;
+    }
 
     function fmtBp(bp) {
         if (bp >= 1e6) return `${+(bp / 1e6).toFixed(2)} Mb`;
@@ -816,7 +822,7 @@
         document.body.appendChild(a); a.click(); a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 10000);
     }
-    const safeName = () => data.contig.name.replace(/[^\w.-]+/g, '_');
+    const safeName = () => `${data.sample ? data.sample + '_' : ''}${data.contig.name}`.replace(/[^\w.-]+/g, '_');
 
     function variantsCsv() {
         const lines = ['contig,position,ref,alt,af,depth,alt_reads,A,C,G,T,del'];
@@ -1058,6 +1064,7 @@
         const c = data.contig;
         const shown = data.reads.length;
         $('meta').innerHTML =
+            (data.sample ? `sample <b>${esc(data.sample)}</b> · ` : '') +
             `<b>${fmtBp(c.length)}</b> · mean depth <b>${esc(c.meandepth)}</b> · covered <b>${esc(c.coverage)}%</b> · ` +
             (data.fraction < 1
                 ? `<b>${shown.toLocaleString()}</b> of ${data.total.toLocaleString()} reads loaded (limit ${(data.limit || 3000).toLocaleString()})`
@@ -1078,7 +1085,7 @@
     });
 
     if (window.opener) {
-        window.opener.postMessage({ type: 'reads-ready', contig: contigName }, location.origin);
+        window.opener.postMessage({ type: 'reads-ready', contig: contigName, sample: sampleName }, location.origin);
     } else {
         status.textContent = 'This view needs the main page that opened it. Click a contig there to reopen it.';
     }
